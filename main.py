@@ -10,6 +10,7 @@ from services import study_sessions
 from services import programs as program_service
 from services import task_steps
 from services import planner
+from services import spaced_repetition
 
 # ==============================================================================
 # SİSTEM VE ZAMAN DİLİMİ AYARLARI (UTC+3 TÜRKİYE SAATİ)
@@ -1470,6 +1471,9 @@ task_steps.init_db()
 
 # FAZ 5C: günlük müsaitlik şeması.
 planner.init_db()
+
+# FAZ 6A: aralıklı tekrar kayıtları (idempotent; veri silmez, geçmişi değiştirmez).
+spaced_repetition.init_db()
 
 def sanitize_key(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]", "_", str(text))

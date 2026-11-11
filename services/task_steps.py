@@ -440,8 +440,25 @@ def gorev_tamam_mi(gorev_id):
     return all(adim["tamam"] for adim in adimlar)
 
 
+def _tekrarlari_planla(gorev_id, an=None):
+    """FAZ 6A köprüsü: tamamlanan öğrenme görevinden aralıklı tekrar üretir."""
+    try:
+        from services import spaced_repetition
+    except ImportError:  # pragma: no cover - servis yoksa görev akışı bozulmaz
+        return []
+    try:
+        return spaced_repetition.tekrar_planla(gorev_id, an=an)
+    except Exception:  # pragma: no cover - tekrar hatası görev işaretini bozmaz
+        return []
+
+
 def gorev_durum_guncelle(gorev_id, an=None):
-    """Görev `durum` alanını alt adımlardan türetir (adım yoksa dokunmaz)."""
+    """Görev `durum` alanını alt adımlardan türetir (adım yoksa dokunmaz).
+
+    FAZ 6A: aralıklı tekrar yalnızca tamamlanmamış -> tamamlanmış (0 -> 1)
+    geçişinde planlanır. Böylece sayfa yenilemesi, yeniden kaydetme veya
+    geçmişte tamamlanmış görevler mükerrer/geriye dönük tekrar üretmez.
+    """
     tamam = gorev_tamam_mi(gorev_id)
     if tamam is None:
         return None
@@ -451,10 +468,18 @@ def gorev_durum_guncelle(gorev_id, an=None):
         return None
     with _baglanti() as conn:
         with _islem(conn):
+            satir = conn.execute(
+                "SELECT durum FROM calisma_programi_gorevler WHERE id = ?", (gid,)
+            ).fetchone()
+            if satir is None:
+                return None
+            onceki = int(satir["durum"] or 0)
             conn.execute(
                 "UPDATE calisma_programi_gorevler SET durum = ? WHERE id = ?",
                 (1 if tamam else 0, gid),
             )
+    if tamam and onceki == 0:
+        _tekrarlari_planla(gid, an)
     return bool(tamam)
 
 
