@@ -4010,7 +4010,7 @@ def alt_konu_degisti(ders, makro, mikro, alt, key_name):
 
 
 def alt_konu_arayuzu_ciz(ders_adi, makro_adi, mikro_ad, alt_set):
-    """Tab 2'de her mikro konunun altına alt başlık kutularını çizer."""
+    """Konu Takip & İlerleme sekmesinde her mikro konunun alt başlıklarını çizer."""
     alts = MIKRO_ALT_KONULAR.get(mikro_ad, [])
     if not alts:
         return
@@ -4579,7 +4579,12 @@ def haftalik_program_gorevleri_uret(
                 return sonuc["gorevler"], "Akıllı plan", uyarilar
             uyarilar.append("Akıllı plan boş döndü.")
         except Exception as hata:  # noqa: BLE001
-            uyarilar.append("Akıllı plan çalışmadı: %s" % hata)
+            log_islem(ogrenci_id, "PLANNER_FALLBACK", "Akıllı plan: %s" % hata)
+            uyarilar.append(
+                "Akıllı plan motoru bu hafta kullanılamadı; yedek motorla"
+                " plan oluşturuldu."
+            )
+
 
     try:
         gorevler = akilli_program_motoru_v2_gorevleri(
@@ -4594,7 +4599,12 @@ def haftalik_program_gorevleri_uret(
             return _gorevleri_zenginlestir(gorevler, ogrenci_id), "Alt başlık motoru", uyarilar
         uyarilar.append("Alt başlık motoru boş plan üretti.")
     except Exception as hata:  # noqa: BLE001 - motor çökse de program korunur
-        uyarilar.append("Alt başlık motoru çalışmadı: %s" % hata)
+        log_islem(ogrenci_id, "PLANNER_FALLBACK", "Alt başlık motoru: %s" % hata)
+        uyarilar.append(
+            "Alt başlık motoru bu hafta kullanılamadı; yedek motorla plan"
+            " oluşturuldu."
+        )
+
 
     try:
         gorevler = akilli_program_motoru_gorevleri(
@@ -4613,7 +4623,12 @@ def haftalik_program_gorevleri_uret(
             )
         uyarilar.append("Soru kotalı motor boş plan üretti.")
     except Exception as hata:  # noqa: BLE001
-        uyarilar.append("Soru kotalı motor çalışmadı: %s" % hata)
+        log_islem(ogrenci_id, "PLANNER_FALLBACK", "Soru kotalı motor: %s" % hata)
+        uyarilar.append(
+            "Soru kotalı motor bu hafta kullanılamadı; yedek motorla plan"
+            " oluşturuldu."
+        )
+
 
     gorevler = eski_program_motoru_gorevleri(
         gunler,
@@ -5341,7 +5356,7 @@ if current_user["rol"] == "admin":
 
 
 # ==============================================================================
-# ÖĞRENCİ KOKPİT ARAYÜZÜ (GÜNCELLENMİŞ 6-TABLI SIRA & YENİ ARAYÜZ MİMARİSİ)
+# ÖĞRENCİ KOKPİT ARAYÜZÜ (9 SEKMELİ SIRA & YENİ ARAYÜZ MİMARİSİ)
 # ==============================================================================
 is_maarif = current_user["sinif_seviyesi"] in ["9. Sınıf", "10. Sınıf"]
 (
@@ -5366,6 +5381,10 @@ with st.sidebar:
     st.write(
         "**Diploma Notu (OBP):**"
         f" `{current_user.get('diploma_notu', 85.0)}`"
+    )
+    st.caption(
+        "OBP katkısı: +%.1f puan (OBP = diploma notu × 5, katkı = OBP × 0.12)"
+        % osym_verisi.obp_katkisi(current_user.get("diploma_notu") or 85.0)
     )
 
     st.markdown(
@@ -5506,7 +5525,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
         "📕 Yanlış Soru Defteri",
         "🚨 Konu Uyarıları & Alarmlar",
         "📅 Haftalık Çalışma Programı",
-        "🤝 Özel Ders & Raporlar",
+        "🤝 Özel Ders & Talepler",
         "📈 Haftalık Performans",
         "🎯 YKS Simülatörü",
     ],
@@ -6024,8 +6043,14 @@ def _onceki_programlar_bolumu(ogrenci_id):
     try:
         gecmis = program_service.gecmis_ozeti(ogrenci_id, limit=8)
     except Exception as hata:  # noqa: BLE001 - arayüz çökmemeli
-        st.caption("Program geçmişi okunamadı: %s" % hata)
+        # Teknik ayrıntı öğrenciye gösterilmez; geliştirici kaydına yazılır.
+        log_islem(ogrenci_id, "PROGRAM_HISTORY_ERROR", str(hata))
+        st.caption(
+            "Önceki programlar şu an görüntülenemiyor. Programınız ve"
+            " görevleriniz etkilenmedi."
+        )
         return
+
     kayitlar = list(gecmis.get("programlar") or [])
     eski = gecmis.get("eski_kayitlar")
     if eski:
@@ -6236,7 +6261,8 @@ with tab1:
             st.markdown("#### ⏳ Devam eden çalışma")
             _oturum_paneli_veya_form(aktif_oturum)
             st.markdown("---")
-        st.info("💡 Bugüne tanımlanmış henüz bir çalışma görevi bulunmuyor. 'Tab 5: Haftalık Çalışma Programı' sekmesinden akıllı programınızı tek tıkla oluşturabilirsiniz!")
+        st.info("💡 Bugüne tanımlanmış henüz bir çalışma görevi bulunmuyor. **📅 Haftalık Çalışma Programı** sekmesinden akıllı programınızı tek tıkla oluşturabilirsiniz.")
+
 
 
 # ==============================================================================
@@ -7655,7 +7681,7 @@ with tab5:
 # ==============================================================================
 with tab6:
     st.header("📅 Haftalık Çalışma Programı Motoru (Ultra-Think)")
-    col_p1, col_p2 = st.columns([1, 1])
+    col_p1, col_p2 = st.columns([1.35, 1])
 
     with col_p1:
         st.subheader("⚙️ Program Oluşturma Ayarları")
@@ -8053,7 +8079,7 @@ with tab6:
                     st.info("Bu gün için planlanmış bir çalışma görevi bulunmuyor.")
 
 # ==============================================================================
-# TAB 7: ÖZEL DERS & RAPORLAR
+# TAB 7: ÖZEL DERS & TALEPLER
 # ==============================================================================
 with tab7:
     st.header("🤝 Özel Ders Talepleri & Çalışma Raporları")
@@ -8442,14 +8468,22 @@ with tab8:
                     if saat_cinsinden
                     else float(hedef_tanimi["maks"])
                 )
+                # Widget anahtarı hedef türüne (ve haftaya) göre ayrılır: tür
+                # değişince önceki değer taşınmaz (dk/soru/% karışması olmaz).
+                hedef_deger_anahtari = "hafta_hedef_deger_%s_%s" % (
+                    secilen_hafta["baslangic"],
+                    hedef_tur,
+                )
+                if hedef_deger_anahtari not in st.session_state:
+                    st.session_state[hedef_deger_anahtari] = 1.0
                 hedef_deger_girdisi = st.number_input(
                     "Hedef değer (%s)" % birim_metni,
                     min_value=0.0,
                     max_value=maks_girdi,
-                    value=1.0,
                     step=0.5 if saat_cinsinden else 1.0,
-                    key="hafta_hedef_deger",
+                    key=hedef_deger_anahtari,
                 )
+
                 st.caption(
                     "Aynı hafta + hedef türü + ders için tek kayıt tutulur;"
                     " yeniden kaydetmek değeri günceller."
@@ -9081,9 +9115,8 @@ with tab9:
         current_user.get("hedef_alan")
     )
     sim_puan_turu_listesi = list(osym_verisi.PUAN_TURLERI)
-    sim_kol_puan, sim_kol_yil, sim_kol_obp, sim_kol_obp_secim = st.columns(
-        [1.2, 1, 1, 1]
-    )
+    # Mobilde sıkışmasın diye kontroller iki satıra bölünür.
+    sim_kol_puan, sim_kol_yil = st.columns(2)
     with sim_kol_puan:
         sim_puan_turu = st.selectbox(
             "Puan türü",
@@ -9096,6 +9129,7 @@ with tab9:
         sim_yil = st.selectbox(
             "Sınav yılı", sim_yil_listesi, index=0, key="sim_yil"
         )
+    sim_kol_obp, sim_kol_obp_secim = st.columns(2)
     with sim_kol_obp:
         sim_diploma = st.number_input(
             "Diploma notu (OBP)",
@@ -9109,6 +9143,7 @@ with tab9:
         sim_obp_dahil = st.toggle(
             "OBP'yi puana ekle", value=True, key="sim_obp_dahil"
         )
+
     st.caption(
         "OBP %.0f → katkı +%.2f puan (diploma notunu değiştirmek için kenar"
         " çubuğundaki **Profili Güncelle** formunu kullanın)."
@@ -9154,9 +9189,11 @@ with tab9:
                 value=ranking_engine.VARSAYILAN_SON_DENEME,
                 key="sim_son_deneme",
             )
-            sim_mevcut = ranking_engine.mevcut_netler(
-                current_user["id"], son_deneme=sim_son_deneme
-            )
+            if sim_son_deneme != ranking_engine.VARSAYILAN_SON_DENEME:
+                sim_mevcut = ranking_engine.mevcut_netler(
+                    current_user["id"], son_deneme=sim_son_deneme
+                )
+
             sim_deneme_ozeti = ", ".join(
                 "%s: %d" % (tur, adet)
                 for tur, adet in sim_mevcut["deneme_sayisi"].items()
@@ -9176,6 +9213,19 @@ with tab9:
             "Netler kaydettiğiniz hedef netlerden geliyor. Hedef netler ayrı"
             " saklanır ve mevcut deneme netlerinizin üzerine yazılmaz."
         )
+        sim_eksik_hedef_netler = [
+            sim_test
+            for sim_test in ranking_engine.gereken_testler(sim_puan_turu)
+            if sim_test not in sim_hedefler
+        ]
+        if sim_eksik_hedef_netler:
+            st.warning(
+                "Bu puan türünde hedef net girmediğiniz testler var: %s."
+                " Bu testler 0 kabul edilir; sonuç hedefinizin altında"
+                " görünebilir. Aşağıdaki formdan tamamlayabilirsiniz."
+                % ", ".join(sim_eksik_hedef_netler)
+            )
+
     else:
         st.caption(
             "Netleri kendiniz girin. Girdiğiniz değerler otomatik olarak"
