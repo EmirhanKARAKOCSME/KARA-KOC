@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import streamlit as st
 
+from services import study_sessions
+
 # ==============================================================================
 # SİSTEM VE ZAMAN DİLİMİ AYARLARI (UTC+3 TÜRKİYE SAATİ)
 # ==============================================================================
@@ -326,6 +328,309 @@ def tarih_gunu(deger):
     return None
 
 
+# ==============================================================================
+# FAZ 3: DERS BAZLI DENEME SONUÇLARI (GENEL DENEMENİN ALT KIRILIMI)
+# ==============================================================================
+DERS_SONUC_MIN_SORU = 1
+DERS_SONUC_MAKS_SORU = 200
+
+# TYT genel denemesi: resmî test grupları ve varsayılan soru sayıları.
+TYT_GENEL_DERS_SORU_SAYILARI = [
+    ("TYT Türkçe", 40),
+    ("TYT Matematik", 40),
+    ("TYT Sosyal Bilimler", 20),
+    ("TYT Fen Bilimleri", 20),
+]
+
+# AYT genel denemesi: öğrencinin alanına göre test grupları.
+# Soru sayıları varsayılandır; giriş ekranında ders bazında değiştirilebilir.
+# NOT: ÖSYM düzeninde AYT Geometri soruları Matematik Testinin İÇİNDEDİR;
+# matematik testi toplam 40 sorudur. Bu yüzden genel denemede ayrı bir
+# "AYT Geometri" satırı yoktur (çift sayım olmasın diye). Geometri ayrı takip
+# edilmek istenirse branş denemesi olarak girilir; müfredattaki AYT Geometri
+# konu takibi ve "AYT Geometri" branş dersi seçeneği bundan etkilenmez.
+AYT_GENEL_DERS_SORU_SAYILARI = {
+    "Sayısal": [
+        ("AYT Matematik", 40),
+        ("AYT Fizik", 14),
+        ("AYT Kimya", 13),
+        ("AYT Biyoloji", 13),
+    ],
+    "Eşit Ağırlık": [
+        ("AYT Matematik", 40),
+        ("AYT Edebiyat", 24),
+        ("AYT Tarih-1", 10),
+        ("AYT Coğrafya-1", 6),
+    ],
+    "Sözel": [
+        ("AYT Edebiyat", 24),
+        ("AYT Tarih-1", 10),
+        ("AYT Coğrafya-1", 6),
+        ("AYT Tarih-2", 11),
+        ("AYT Coğrafya-2", 11),
+        ("AYT Felsefe Grubu", 12),
+        ("AYT Din Kültürü", 6),
+    ],
+    "Dil": [("YDT İngilizce", 80)],
+}
+
+_TR_HARF_ESLEME = str.maketrans("ışğüöçâİŞĞÜÖÇ", "isguocaISGUOC")
+
+
+def alan_normalize(alan):
+    """'sayısal' / 'EA' / 'SÖZ' gibi yazımları kanonik alan adına çevirir."""
+    metin = str(alan or "").strip().translate(_TR_HARF_ESLEME).lower()
+    metin = " ".join(metin.split())
+    if metin in ("sayisal", "say", "mf"):
+        return "Sayısal"
+    if metin in ("esit agirlik", "ea", "esit", "tm"):
+        return "Eşit Ağırlık"
+    if metin in ("sozel", "soz", "ts"):
+        return "Sözel"
+    if metin in ("dil", "ydt", "yabanci dil"):
+        return "Dil"
+    return None
+
+
+def genel_ders_secenekleri(deneme_turu, hedef_alan=None):
+    """Genel denemede ders bazlı sonuç girilebilecek dersler: [(ders, soru)].
+
+    TYT -> Türkçe / Matematik / Sosyal Bilimler / Fen Bilimleri
+    AYT -> öğrencinin alanına göre test grupları
+    YDT -> YDT İngilizce
+    """
+    tur = tur_normalize(deneme_turu)
+    if tur == "TYT":
+        return [(d, int(s)) for d, s in TYT_GENEL_DERS_SORU_SAYILARI]
+    if tur == "AYT":
+        alan = alan_normalize(hedef_alan)
+        return [
+            (d, int(s)) for d, s in AYT_GENEL_DERS_SORU_SAYILARI.get(alan, [])
+        ]
+    if tur == "YDT":
+        return [(d, int(s)) for d, s in AYT_GENEL_DERS_SORU_SAYILARI["Dil"]]
+    return []
+
+
+def ders_net_hesapla(dogru, yanlis):
+    """Ders neti: Net = Doğru - (Yanlış / 4), iki ondalık."""
+    try:
+        d = float(dogru or 0)
+        y = float(yanlis or 0)
+    except (TypeError, ValueError) as hata:
+        raise ValueError(
+            "Doğru ve yanlış sayıları sayısal olmalıdır."
+        ) from hata
+    if d < 0 or y < 0:
+        raise ValueError("Doğru ve yanlış sayıları negatif olamaz.")
+    return round(d - (y / 4.0), 2)
+
+
+def ders_sonucu_dogrula(
+    ders, dogru=0, yanlis=0, bos=0, soru_sayisi=None, sure_dk=None
+):
+    """Tek bir ders sonucunu doğrular ve normalize eder.
+
+    Kurallar:
+    - Ders adı boş olamaz.
+    - Doğru / yanlış / boş negatif veya ondalıklı olamaz.
+    - Doğru + yanlış + boş, dersin soru sayısını aşamaz.
+    - Net her zaman Doğru - (Yanlış / 4) olarak YENİDEN hesaplanır.
+
+    Dönüş: {"ders", "soru_sayisi", "dogru", "yanlis", "bos", "net",
+            "sure_dk"}. Hatalı girişte ValueError.
+    """
+    ad = str(ders or "").strip()
+    if not ad:
+        raise ValueError("Ders adı boş olamaz.")
+
+    def _tam(deger, etiket, varsayilan=0):
+        if deger is None or (isinstance(deger, str) and not deger.strip()):
+            return varsayilan
+        try:
+            sayi = float(deger)
+        except (TypeError, ValueError) as hata:
+            raise ValueError(
+                f"{ad}: {etiket} sayısal olmalıdır."
+            ) from hata
+        if sayi != int(sayi):
+            raise ValueError(f"{ad}: {etiket} tam sayı olmalıdır.")
+        sayi = int(sayi)
+        if sayi < 0:
+            raise ValueError(f"{ad}: {etiket} negatif olamaz.")
+        return sayi
+
+    d = _tam(dogru, "doğru")
+    y = _tam(yanlis, "yanlış")
+    b = _tam(bos, "boş")
+    isaretli = d + y + b
+    if soru_sayisi is None or (
+        isinstance(soru_sayisi, str) and not soru_sayisi.strip()
+    ):
+        ss = isaretli
+    else:
+        ss = _tam(soru_sayisi, "soru sayısı")
+        if ss < DERS_SONUC_MIN_SORU:
+            raise ValueError(
+                f"{ad}: soru sayısı en az {DERS_SONUC_MIN_SORU} olmalıdır."
+            )
+        if ss > DERS_SONUC_MAKS_SORU:
+            raise ValueError(
+                f"{ad}: soru sayısı en fazla {DERS_SONUC_MAKS_SORU} olabilir."
+            )
+        if isaretli > ss:
+            raise ValueError(
+                f"{ad}: doğru+yanlış+boş toplamı ({isaretli}) dersin soru"
+                f" sayısını ({ss}) aşıyor."
+            )
+    sure = None if sure_dk in (None, "") else _tam(sure_dk, "süre")
+    return {
+        "ders": ad,
+        "soru_sayisi": ss,
+        "dogru": d,
+        "yanlis": y,
+        "bos": b,
+        "net": ders_net_hesapla(d, y),
+        "sure_dk": sure,
+    }
+
+
+def ders_sonuclari_dogrula(sonuclar, deneme_turu=None):
+    """Ders sonucu listesini topluca doğrular.
+
+    - Tamamen boş satırlar sessizce atlanır (sıfır uydurulmaz).
+    - Aynı ders iki kez verilemez.
+    - Ders adı sınav türüyle uyumlu olmalı (TYT denemesine AYT dersi girilemez).
+    """
+    tur = tur_normalize(deneme_turu)
+    temiz = []
+    gorulen = set()
+    for ham in list(sonuclar or []):
+        if not isinstance(ham, dict):
+            raise ValueError("Her ders sonucu sözlük (dict) olmalıdır.")
+        satir = ders_sonucu_dogrula(
+            ham.get("ders"),
+            ham.get("dogru", 0),
+            ham.get("yanlis", 0),
+            ham.get("bos", 0),
+            ham.get("soru_sayisi"),
+            ham.get("sure_dk"),
+        )
+        if satir["dogru"] + satir["yanlis"] + satir["bos"] == 0:
+            continue
+        if tur and not brans_tur_uyumlu(satir["ders"], tur):
+            raise ValueError(
+                f"'{satir['ders']}' dersi {tur} genel denemesiyle uyumlu"
+                " değil."
+            )
+        if satir["ders"] in gorulen:
+            raise ValueError(
+                f"'{satir['ders']}' dersi bu denemede birden fazla kez"
+                " girildi."
+            )
+        gorulen.add(satir["ders"])
+        temiz.append(satir)
+    return temiz
+
+
+def ders_toplam_neti(sonuclar):
+    """Ders sonuçlarının toplam neti."""
+    return round(sum(float(s.get("net") or 0) for s in (sonuclar or [])), 2)
+
+
+def net_ozeti(netler):
+    """Net serisinin özeti; yetersiz veride uydurma yapmaz.
+
+    - "son" / "en_yuksek": en az 1 deneme varsa dolu.
+    - "son_uc_ortalama": en az 3 deneme varsa dolu.
+    - "gelisim": en az 6 deneme varsa dolu (son 3 ort. - önceki 3 ort.).
+    """
+    degerler = []
+    for n in netler or []:
+        if n is None:
+            continue
+        try:
+            degerler.append(float(n))
+        except (TypeError, ValueError):
+            continue
+    ozet = {
+        "adet": len(degerler),
+        "son": None,
+        "en_yuksek": None,
+        "son_uc_ortalama": None,
+        "onceki_uc_ortalama": None,
+        "gelisim": None,
+    }
+    if not degerler:
+        return ozet
+    ozet["son"] = round(degerler[-1], 2)
+    ozet["en_yuksek"] = round(max(degerler), 2)
+    if len(degerler) >= 3:
+        ozet["son_uc_ortalama"] = round(sum(degerler[-3:]) / 3.0, 2)
+    if len(degerler) >= 6:
+        ozet["onceki_uc_ortalama"] = round(sum(degerler[-6:-3]) / 3.0, 2)
+        ozet["gelisim"] = round(
+            ozet["son_uc_ortalama"] - ozet["onceki_uc_ortalama"], 2
+        )
+    return ozet
+
+
+def ders_seri_listesi(df_sonuclar, deneme_turu, kategori=DENEME_KATEGORI_GENEL):
+    """Bir sınav türünde ders sonucu bulunan dersleri kanonik sırada döndürür."""
+    if df_sonuclar is None or len(df_sonuclar.index) == 0:
+        return []
+    df = df_sonuclar.copy()
+    for kolon in ("deneme_turu", "deneme_kategorisi", "ders"):
+        if kolon not in df.columns:
+            return []
+        df[kolon] = df[kolon].fillna("").astype(str)
+    alt = df[
+        (df["deneme_turu"] == str(deneme_turu))
+        & (df["deneme_kategorisi"] == str(kategori))
+    ]
+    bulunan = {d.strip() for d in alt["ders"].tolist() if str(d).strip()}
+    kanonik = [d for d, _ in genel_ders_secenekleri(deneme_turu)]
+    return sorted(
+        bulunan,
+        key=lambda d: (kanonik.index(d) if d in kanonik else 999, d),
+    )
+
+
+def ders_net_serisi(
+    df_sonuclar, deneme_turu, ders, kategori=DENEME_KATEGORI_GENEL
+):
+    """Tek bir dersin net serisini kronolojik olarak döndürür.
+
+    Genel denemenin ders sonuçları ile branş denemeleri asla birleşmez:
+    `kategori` varsayılan olarak "Genel Deneme"dir ve deneme başına tek
+    nokta üretilir.
+    """
+    if df_sonuclar is None or len(df_sonuclar.index) == 0:
+        return df_sonuclar
+    df = df_sonuclar.copy()
+    for kolon in ("ders", "deneme_turu", "deneme_kategorisi"):
+        if kolon not in df.columns:
+            return df.iloc[0:0]
+        df[kolon] = df[kolon].fillna("").astype(str)
+    if "tarih" not in df.columns:
+        df["tarih"] = ""
+    df["tarih"] = df["tarih"].fillna("").astype(str)
+    mask = (df["ders"] == str(ders)) & (df["deneme_turu"] == str(deneme_turu))
+    if kategori:
+        mask &= df["deneme_kategorisi"] == str(kategori)
+    seri = df[mask].copy()
+    if seri.empty:
+        return seri
+    seri["net"] = pd.to_numeric(seri["net"], errors="coerce")
+    seri["deneme_id"] = (
+        pd.to_numeric(seri["deneme_id"], errors="coerce").fillna(0).astype(int)
+    )
+    seri = seri.dropna(subset=["net"])
+    seri = seri.sort_values(["tarih", "deneme_id"], kind="stable")
+    seri = seri.drop_duplicates(subset=["deneme_id"], keep="last")
+    return seri.reset_index(drop=True)
+
+
 def deneme_kaydet(
     conn,
     ogrenci_id,
@@ -341,11 +646,18 @@ def deneme_kaydet(
     bos_adedi=None,
     sure_dk=None,
     kayit_kaynagi=DENEME_KAYNAK_WIZARD,
+    ders_sonuclari=None,
 ):
-    """Deneme başlığını ve (varsa) yanlış detaylarını TEK transaction'da yazar.
+    """Deneme başlığını, (varsa) ders sonuçlarını ve yanlış detaylarını yazar.
 
     - Başlık, yanlış listesi boş olsa bile mutlaka oluşturulur.
     - Genel denemede `brans_dersi` NULL'a zorlanır; branş denemesinde zorunludur.
+    - FAZ 3: `ders_sonuclari` verilirse her dersin neti doğru/yanlıştan
+      otomatik hesaplanır ve `deneme_ders_sonuclari`'na yazılır. Toplam net
+      ders netlerinin toplamıyla uyuşmak zorundadır; `net_bilgisi=None`
+      verilirse toplam net ders sonuçlarından hesaplanır.
+    - Branş denemesinde tek ders satırı otomatik oluşturulur; ders detayı
+      (doğru/yanlış/boş) verilmişse net bu değerlerden hesaplanır.
     - Hata olursa SAVEPOINT ile geri alınır, yarım kayıt kalmaz.
 
     Dönüş: oluşturulan `denemeler.id`
@@ -375,12 +687,51 @@ def deneme_kaydet(
     if gun is None:
         raise ValueError(f"Geçersiz deneme tarihi: {tarih!r}")
 
-    try:
-        net = float(net_bilgisi if net_bilgisi is not None else 0.0)
-    except (TypeError, ValueError) as hata:
-        raise ValueError("Net bilgisi sayısal olmalıdır.") from hata
+    sonuclar = ders_sonuclari_dogrula(ders_sonuclari, tur)
+    if kategori == DENEME_KATEGORI_BRANS and sonuclar:
+        if len(sonuclar) > 1 or sonuclar[0]["ders"] != brans:
+            raise ValueError(
+                "Branş denemesinde yalnızca seçilen branş dersinin sonucu"
+                " kaydedilebilir."
+            )
+
+    if net_bilgisi is None:
+        if not sonuclar:
+            raise ValueError("Net bilgisi zorunludur.")
+        net = ders_toplam_neti(sonuclar)
+    else:
+        try:
+            net = float(net_bilgisi)
+        except (TypeError, ValueError) as hata:
+            raise ValueError("Net bilgisi sayısal olmalıdır.") from hata
+        if sonuclar:
+            ders_net = ders_toplam_neti(sonuclar)
+            if abs(net - ders_net) > 0.05:
+                raise ValueError(
+                    f"Toplam net ({net:.2f}) ders sonuçlarının toplamıyla"
+                    f" ({ders_net:.2f}) uyuşmuyor."
+                )
     if net < 0:
         raise ValueError("Net bilgisi negatif olamaz.")
+
+    if kategori == DENEME_KATEGORI_BRANS and not sonuclar:
+        # FAZ 3: branş sonucu her zaman ders sonuçları tablosuna bağlanır.
+        if dogru_adedi is None and yanlis_adedi is None and bos_adedi is None:
+            sonuclar = [{
+                "ders": brans,
+                "soru_sayisi": None,
+                "dogru": None,
+                "yanlis": None,
+                "bos": None,
+                "net": net,
+                "sure_dk": sure_dk,
+            }]
+        else:
+            satir = ders_sonucu_dogrula(
+                brans, dogru_adedi, yanlis_adedi, bos_adedi, None, sure_dk
+            )
+            net = satir["net"]  # net yalnızca doğru/yanlıştan hesaplanır
+            sonuclar = [satir]
 
     if yanlis_adedi is None:
         yanlis_adedi = int(sum(int(y.get("yanlis_adedi") or 0) for y in yanlislar))
@@ -412,6 +763,25 @@ def deneme_kaydet(
             ),
         )
         deneme_id = cur.lastrowid
+
+        # FAZ 3: ders bazlı sonuçlar (genel deneme) veya branş ders sonucu.
+        for s in sonuclar:
+            cur.execute(
+                """INSERT INTO deneme_ders_sonuclari
+                   (deneme_id, ders, soru_sayisi, dogru, yanlis, bos, net,
+                    sure_dk)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    deneme_id,
+                    s["ders"],
+                    s["soru_sayisi"],
+                    s["dogru"],
+                    s["yanlis"],
+                    s["bos"],
+                    s["net"],
+                    s["sure_dk"],
+                ),
+            )
 
         for y in yanlislar:
             konu = str(y.get("mikro") or y.get("konu_adi") or "").strip()
@@ -639,6 +1009,77 @@ def denemeleri_getir(conn, ogrenci_id):
     )
 
 
+def deneme_ders_sonuclari_getir(conn, ogrenci_id):
+    """Öğrencinin tüm ders bazlı deneme sonuçlarını (başlık bilgisiyle) getirir."""
+    return pd.read_sql_query(
+        "SELECT s.id, s.deneme_id, s.ders, s.soru_sayisi, s.dogru,"
+        " s.yanlis, s.bos, s.net, s.sure_dk,"
+        " d.tarih AS tarih, d.deneme_adi AS deneme_adi,"
+        " d.deneme_kategorisi AS deneme_kategorisi,"
+        " d.deneme_turu AS deneme_turu, d.brans_dersi AS brans_dersi"
+        " FROM deneme_ders_sonuclari s"
+        " JOIN denemeler d ON d.id = s.deneme_id"
+        " WHERE d.ogrenci_id = ?"
+        " ORDER BY d.tarih ASC, d.id ASC, s.ders ASC",
+        conn,
+        params=(ogrenci_id,),
+    )
+
+
+def deneme_ders_sonucu_ekle(
+    conn,
+    deneme_id,
+    ders,
+    dogru=0,
+    yanlis=0,
+    bos=0,
+    soru_sayisi=None,
+    sure_dk=None,
+):
+    """Var olan bir denemeye tek ders sonucu ekler.
+
+    Aynı deneme + ders için ikinci kayıt UNIQUE indeks ile engellenir;
+    çakışma ValueError'a çevrilir (sessizce üzerine yazılmaz).
+    """
+    satir = ders_sonucu_dogrula(
+        ders, dogru, yanlis, bos, soru_sayisi, sure_dk
+    )
+    baslik = conn.execute(
+        "SELECT deneme_turu FROM denemeler WHERE id = ?", (int(deneme_id),)
+    ).fetchone()
+    if baslik is None:
+        raise ValueError(f"Deneme bulunamadı: {deneme_id}")
+    tur = baslik[0] if not hasattr(baslik, "keys") else baslik["deneme_turu"]
+    if not brans_tur_uyumlu(satir["ders"], tur):
+        raise ValueError(
+            f"'{satir['ders']}' dersi {tur} sınav türüyle uyumlu değil."
+        )
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """INSERT INTO deneme_ders_sonuclari
+               (deneme_id, ders, soru_sayisi, dogru, yanlis, bos, net, sure_dk)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                int(deneme_id),
+                satir["ders"],
+                satir["soru_sayisi"],
+                satir["dogru"],
+                satir["yanlis"],
+                satir["bos"],
+                satir["net"],
+                satir["sure_dk"],
+            ),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as hata:
+        conn.rollback()
+        raise ValueError(
+            f"'{satir['ders']}' dersi bu deneme için zaten kayıtlı."
+        ) from hata
+    return int(cur.lastrowid)
+
+
 def baglanmamis_yanlis_sayisi(conn, ogrenci_id):
     """deneme_id'si hâlâ NULL olan aktif yanlış detayı sayısı."""
     satir = conn.execute(
@@ -649,8 +1090,14 @@ def baglanmamis_yanlis_sayisi(conn, ogrenci_id):
     return int(satir[0] if satir else 0)
 
 
-def grafik_seri_secenekleri(df_denemeler, deneme_turu):
-    """Grafik için ayrık seri seçenekleri: genel deneme + her branş ayrı."""
+def grafik_seri_secenekleri(df_denemeler, deneme_turu, df_ders=None):
+    """Grafik için ayrık seri seçenekleri.
+
+    FAZ 2: genel deneme toplamı + her branş ayrı seri.
+    FAZ 3: genel denemenin ders bazlı netleri (varsa) ayrı seriler; böylece
+    "TYT Matematik • Ders Bazlı" (genel deneme) ile "TYT Matematik" (branş)
+    hiçbir zaman aynı seride birleşmez.
+    """
     secenekler = []
     if df_denemeler is None or df_denemeler.empty:
         return secenekler
@@ -663,6 +1110,17 @@ def grafik_seri_secenekleri(df_denemeler, deneme_turu):
                 "etiket": f"{deneme_turu} Genel Deneme",
                 "kategori": DENEME_KATEGORI_GENEL,
                 "brans_dersi": None,
+                "kaynak": "toplam",
+            }
+        )
+    for ders in ders_seri_listesi(df_ders, deneme_turu, DENEME_KATEGORI_GENEL):
+        secenekler.append(
+            {
+                "etiket": f"{ders} • Ders Bazlı",
+                "kategori": DENEME_KATEGORI_GENEL,
+                "brans_dersi": None,
+                "kaynak": "ders",
+                "ders": ders,
             }
         )
     branslar = {
@@ -678,6 +1136,7 @@ def grafik_seri_secenekleri(df_denemeler, deneme_turu):
                 "etiket": brans,
                 "kategori": DENEME_KATEGORI_BRANS,
                 "brans_dersi": brans,
+                "kaynak": "toplam",
             }
         )
     return secenekler
@@ -895,6 +1354,35 @@ def init_db():
             ON denemeler(ogrenci_id, tarih)
         """)
 
+        # FAZ 3: genel denemenin ders bazlı sonuçları. Eski denemeler için
+        # geriye dönük kayıt ÜRETİLMEZ; tablo yalnızca yeni girişleri tutar.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS deneme_ders_sonuclari (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                deneme_id INTEGER NOT NULL,
+                ders TEXT NOT NULL,
+                soru_sayisi INTEGER,
+                dogru INTEGER DEFAULT 0,
+                yanlis INTEGER DEFAULT 0,
+                bos INTEGER DEFAULT 0,
+                net REAL DEFAULT 0,
+                sure_dk INTEGER,
+                FOREIGN KEY(deneme_id) REFERENCES denemeler(id)
+                    ON DELETE CASCADE
+            )
+        """)
+
+        # Aynı denemede aynı ders için ikinci sonuç kaydını engeller.
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_deneme_ders_tekil
+            ON deneme_ders_sonuclari(deneme_id, ders)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_deneme_ders_ders
+            ON deneme_ders_sonuclari(ders, deneme_id)
+        """)
+
         mevcut_kolonlar = [
             satir[1] for satir in cursor.execute(
                 "PRAGMA table_info(deneme_konu_yanlislari)"
@@ -940,6 +1428,9 @@ def init_db():
 
 
 init_db()
+
+# FAZ 4: gerçek çalışma oturumları tablosu/indeksleri (idempotent, veri silmez).
+study_sessions.init_db()
 
 def sanitize_key(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]", "_", str(text))
@@ -2829,7 +3320,8 @@ def init_program_motoru_db():
 
 init_program_motoru_db()
 
-SORU_ILERLEME_ATLANACAK = ("Günlük Paragraf", "Soru Çözümü & Prova", "Özet Not Çalışması")
+# FAZ 4: `SORU_ILERLEME_ATLANACAK` listesi, kaldırılan `soru_ilerleme_isle()`
+# ile birlikte geçersiz kaldı; planlanan soru artık ilerlemeye yazılmıyor.
 
 
 def konu_soru_hedefi_hesapla(makro, mikro_sayisi, aktif_yanlis=0):
@@ -2872,36 +3364,16 @@ def soru_borcu_baslat(ogrenci_id, ders, mikro_listesi):
         pass
 
 
-def soru_ilerleme_isle(gorev_id, tamamlandi):
-    """Görev işaretlenince/işareti kalkınca çözülen soru sayısını konuya yazar."""
-    try:
-        with get_connection() as c:
-            cur = c.cursor()
-            cur.execute(
-                "SELECT ogrenci_id, ders, mikro_konu, hedef_soru, pedagoji_turu"
-                " FROM calisma_programi_gorevler WHERE id = ?",
-                (gorev_id,),
-            )
-            r = cur.fetchone()
-            if not r:
-                return
-            oid, ders, mikro, soru, ped = r
-            if (not soru) or soru <= 0 or ped == "Tekrar" or mikro in SORU_ILERLEME_ATLANACAK:
-                return
-            delta = soru if tamamlandi else -soru
-            cur.execute(
-                "INSERT OR IGNORE INTO konu_soru_ilerleme (ogrenci_id, ders,"
-                " mikro_konu, cozulen_soru) VALUES (?, ?, ?, 0)",
-                (oid, ders, mikro),
-            )
-            cur.execute(
-                "UPDATE konu_soru_ilerleme SET cozulen_soru = MAX(0, cozulen_soru + ?)"
-                " WHERE ogrenci_id = ? AND ders = ? AND mikro_konu = ?",
-                (delta, oid, ders, mikro),
-            )
-            c.commit()
-    except Exception:
-        pass
+# FAZ 4: `soru_ilerleme_isle()` KALDIRILDI.
+#
+# Eski davranış: görev "Tamamlandı" işaretlenince `hedef_soru` (PLANLANAN soru
+# sayısı) kadar soru çözülmüş gibi `konu_soru_ilerleme` tablosuna yazıyordu.
+# Bu, hiç çözülmemiş soruları çözülmüş gibi gösteriyordu.
+#
+# Yeni kural: soru ilerlemesi YALNIZCA services/study_sessions.py üzerinden
+# kaydedilen TAMAMLANMIŞ çalışma oturumlarından (cozulen_soru) hesaplanır.
+# Görev checkbox'ları yalnızca görev durumunu (calisma_programi_gorevler.durum)
+# değiştirir. Eski `konu_soru_ilerleme` kayıtları silinmez, yeniden yazılmaz.
 
 
 def hiz_gecmisi_kaydet(ogrenci_id):
@@ -3624,6 +4096,22 @@ def gorev_alt_konu_isle(gorev_id, tamamlandi):
         pass
 
 
+def gorev_chk_durum_senkron(anahtar, veritaban_degeri):
+    """Görev checkbox'ının oturum değerini veritabanıyla eşitler.
+
+    Aynı görev hem "Bugünün Görevleri" hem "Haftalık Program" sekmesinde
+    işaretlenebildiği için, bir sekmede yapılan değişiklik diğer sekmedeki
+    eski widget değeriyle çakışıyor; iki sekme birbirini geri alıp sonsuz
+    `st.rerun()` döngüsüne giriyordu. Veritabanı değeri değiştiğinde widget
+    oturum değeri burada güncellenir.
+    """
+    isaret = anahtar + "__db"
+    yeni = bool(veritaban_degeri)
+    if st.session_state.get(isaret) != yeni:
+        st.session_state[anahtar] = yeni
+        st.session_state[isaret] = yeni
+
+
 def akilli_program_motoru_v2_uygula(
     cursor, ogrenci_id, aktif_mufredat, alarmlar,
     ana_blok_sayisi, blok_soru_butcesi, paragraf_hedef,
@@ -3939,6 +4427,19 @@ if not st.session_state.active_user:
     st.stop()
 
 current_user = st.session_state.active_user
+
+# FAZ 4: Çalışma serisi artık GİRİŞ tarihine değil GERÇEK ÇALIŞMAYA bağlı.
+# `update_user_streak()` giriş günlerini sayıyordu; bu gerçek çalışma serisi
+# değildir. Seri, tamamlanmış çalışma oturumlarından hesaplanır (bir günde
+# toplam en az 15 dk tamamlanmış çalışma o günü saydırır). Eski giriş bazlı
+# değer veritabanında korunur (silinmez), yalnızca ekranda gerçek seri
+# gösterilir. Profil tasarımı değiştirilmez.
+try:
+    current_user["streak_count"] = study_sessions.gercek_calisma_serisi(
+        current_user["id"]
+    )
+except Exception:
+    current_user["streak_count"] = current_user.get("streak_count", 0)
 
 
 # ==============================================================================
@@ -4811,6 +5312,350 @@ def resolve_alarm(id_list):
 
 
 # ==============================================================================
+# FAZ 4: GERÇEK ÇALIŞMA ZAMANLAYICISI (ARAYÜZ KATMANI)
+# ==============================================================================
+# İş mantığının tamamı services/study_sessions.py içindedir; burada yalnızca
+# gösterim ve kullanıcı etkileşimi yapılır.
+CALISMA_BITIR_ANAHTARI = "calisma_bitir_oturum_id"
+
+_CALISMA_SAYAC_CSS = """
+<style>
+.calisma-sayac{background:#eef2ff;border:1px solid #c7d2fe;border-radius:12px;
+    padding:12px 16px;margin:6px 0 10px 0;}
+.calisma-sayac .etiket{display:block;font-size:0.78rem;letter-spacing:0.06em;
+    color:#4338ca;font-weight:700;}
+.calisma-sayac .sure{display:block;font-size:2rem;font-weight:800;
+    font-variant-numeric:tabular-nums;color:#1e1b4b;line-height:1.15;}
+.calisma-sayac .konu{display:block;font-size:0.85rem;color:#475569;}
+</style>
+"""
+
+
+def sure_bicimle(saniye):
+    """Saniyeyi SS:DD:SS biçimine çevirir."""
+    saniye = max(0, int(saniye or 0))
+    return f"{saniye // 3600:02d}:{(saniye % 3600) // 60:02d}:{saniye % 60:02d}"
+
+
+def dakika_bicimle(dakika):
+    """Dakikayı '2 saat 35 dakika' biçiminde okunur hâle getirir."""
+    dakika = max(0, int(dakika or 0))
+    saat, kalan = divmod(dakika, 60)
+    if saat and kalan:
+        return f"{saat} saat {kalan} dakika"
+    if saat:
+        return f"{saat} saat"
+    return f"{kalan} dakika"
+
+
+def _calisma_hata_goster(hata):
+    st.error(f"⚠️ {hata}")
+
+
+def _oturum_sayac_icerigi(oturum_id):
+    """Aktif oturumun geçen süresini çizer (yalnız bu parça yenilenir)."""
+    oturum = study_sessions.oturum_getir(oturum_id)
+    if not oturum or oturum["durum"] not in study_sessions.AKTIF_DURUMLAR:
+        return
+    mola_mi = oturum["durum"] == study_sessions.DURUM_MOLA
+    konu = oturum.get("mikro_konu") or ""
+    st.markdown(
+        f'<div class="calisma-sayac">'
+        f'<span class="etiket">'
+        f'{"☕ MOLADASINIZ" if mola_mi else "⏱️ ÇALIŞMA SÜRÜYOR"}</span>'
+        f'<span class="sure">{sure_bicimle(study_sessions.gecen_saniye(oturum))}</span>'
+        f'<span class="konu">{oturum.get("ders") or ""}'
+        f'{" • " + konu if konu else ""}</span>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# Streamlit 1.37+: sayaç yalnız kendi parçasını saniyede bir yeniler; tüm
+# uygulama her saniye yeniden çalışmaz. Eski sürümlerde süre her etkileşimde
+# veya sayfa yenilemesinde güncellenir (fallback).
+if hasattr(st, "fragment"):
+    _oturum_sayaci = st.fragment(run_every=1.0)(_oturum_sayac_icerigi)
+else:
+    _oturum_sayaci = _oturum_sayac_icerigi
+
+
+def _aktif_oturum_paneli(oturum):
+    """Aktif oturumun sayacı + Mola Ver / Devam Et / Bitir / İptal işlemleri."""
+    oid = int(oturum["id"])
+    st.markdown(_CALISMA_SAYAC_CSS, unsafe_allow_html=True)
+    _oturum_sayaci(oid)
+
+    mola_mi = oturum["durum"] == study_sessions.DURUM_MOLA
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if mola_mi:
+            if st.button(
+                "▶️ Çalışmaya Devam Et",
+                key=f"calisma_devam_{oid}",
+                type="primary",
+            ):
+                try:
+                    study_sessions.oturum_devam_ettir(oid)
+                except study_sessions.CalismaOturumHatasi as hata:
+                    _calisma_hata_goster(hata)
+                else:
+                    st.rerun()
+        else:
+            if st.button("☕ Mola Ver", key=f"calisma_mola_{oid}"):
+                try:
+                    study_sessions.oturum_duraklat(oid)
+                except study_sessions.CalismaOturumHatasi as hata:
+                    _calisma_hata_goster(hata)
+                else:
+                    st.rerun()
+    with col_b:
+        if st.button(
+            "⏹️ Çalışmayı Bitir",
+            key=f"calisma_bitir_{oid}",
+            type="secondary",
+        ):
+            try:
+                # Süre dondurulur; kayıt ekranında öğrenci kontrol eder.
+                study_sessions.oturum_duraklat(oid)
+            except study_sessions.CalismaOturumHatasi as hata:
+                _calisma_hata_goster(hata)
+            else:
+                st.session_state[CALISMA_BITIR_ANAHTARI] = oid
+                st.rerun()
+
+    with st.expander("⚙️ Bu çalışmayı iptal et"):
+        st.caption(
+            "Yanlışlıkla başlatıldıysa iptal edebilirsiniz. Kayıt silinmez,"
+            " çalışma istatistiklerine katılmaz."
+        )
+        if st.button("🚫 Oturumu iptal et", key=f"calisma_iptal_{oid}"):
+            try:
+                study_sessions.oturum_iptal(oid)
+            except study_sessions.CalismaOturumHatasi as hata:
+                _calisma_hata_goster(hata)
+            else:
+                st.session_state.pop(CALISMA_BITIR_ANAHTARI, None)
+                st.rerun()
+
+
+def _oturum_bitirme_formu(oturum, planlanan_soru=0):
+    """Çalışma bitirme ekranı: gerçek süre + gerçek çözülen soru sayısı."""
+    oid = int(oturum["id"])
+    olculen = study_sessions.gecen_saniye(oturum)
+    max_dk = study_sessions.MAKS_GERCEK_SURE_DK
+    olculen_dk = min(max_dk, int(round(olculen / 60.0)))
+    konu = oturum.get("mikro_konu") or "-"
+
+    st.markdown("#### 📝 Çalışma Kaydı")
+    st.caption(f"{oturum.get('ders') or ''} • {konu}")
+    st.markdown(f"**Zamanlayıcının ölçtüğü süre:** `{sure_bicimle(olculen)}`")
+    st.caption(
+        "Uygulama kapalıyken geçen süre ölçüme dâhil olmuş olabilir."
+        " Gerçek odak süreniz farklıysa aşağıdan düzeltin."
+    )
+
+    with st.form(f"calisma_kayit_form_{oid}"):
+        gercek_dk = st.number_input(
+            "Gerçek çalışma süresi (dakika)",
+            min_value=0,
+            max_value=max_dk,
+            value=olculen_dk,
+            step=1,
+            key=f"calisma_kayit_dk_{oid}",
+        )
+        cozulen = st.number_input(
+            "Gerçek çözülen soru sayısı",
+            min_value=0,
+            max_value=study_sessions.MAKS_COZULEN_SORU,
+            value=0,
+            step=1,
+            key=f"calisma_kayit_soru_{oid}",
+            help="Bu çalışmada gerçekten üzerinden geçtiğiniz soru sayısı.",
+        )
+        if planlanan_soru:
+            st.caption(
+                f"Planlanan soru: **{planlanan_soru}** (plan verisi)."
+                " Buraya planı değil gerçekte çözdüğünüz soru sayısını yazın."
+            )
+        kirilim_var = st.checkbox(
+            "Soruları doğru / yanlış / boş olarak ayırdım",
+            value=False,
+            key=f"calisma_kayit_kirilim_{oid}",
+            help="Takip etmiyorsanız işaretlemeyin; bu alanlar boş (NULL) kalır.",
+        )
+        dogru = yanlis = bos = None
+        if kirilim_var:
+            col_d, col_y, col_b = st.columns(3)
+            with col_d:
+                dogru = st.number_input(
+                    "Doğru",
+                    min_value=0,
+                    max_value=study_sessions.MAKS_COZULEN_SORU,
+                    value=0,
+                    step=1,
+                    key=f"calisma_kayit_dogru_{oid}",
+                )
+            with col_y:
+                yanlis = st.number_input(
+                    "Yanlış",
+                    min_value=0,
+                    max_value=study_sessions.MAKS_COZULEN_SORU,
+                    value=0,
+                    step=1,
+                    key=f"calisma_kayit_yanlis_{oid}",
+                )
+            with col_b:
+                bos = st.number_input(
+                    "Boş",
+                    min_value=0,
+                    max_value=study_sessions.MAKS_COZULEN_SORU,
+                    value=0,
+                    step=1,
+                    key=f"calisma_kayit_bos_{oid}",
+                )
+            st.caption(
+                "Doğru + yanlış + boş toplamı çözülen soru sayısına eşit"
+                " olmalıdır; eşleşmezse kayıt reddedilir."
+            )
+        notu = st.text_area(
+            "Öğrenci notu (isteğe bağlı)",
+            placeholder="Örn: Zor sorularda zorlandım, yarın buradan devam edeceğim.",
+            max_chars=study_sessions.MAKS_NOT_UZUNLUK,
+            key=f"calisma_kayit_not_{oid}",
+        )
+        col_kaydet, col_vazgec = st.columns(2)
+        with col_kaydet:
+            kaydet = st.form_submit_button("💾 Kaydet", type="primary")
+        with col_vazgec:
+            vazgec = st.form_submit_button("Vazgeç")
+
+    if vazgec:
+        st.session_state.pop(CALISMA_BITIR_ANAHTARI, None)
+        st.rerun()
+    if kaydet:
+        try:
+            study_sessions.oturum_tamamla(
+                oid,
+                cozulen_soru=cozulen,
+                gercek_sure_dk=gercek_dk,
+                dogru=dogru,
+                yanlis=yanlis,
+                bos=bos,
+                ogrenci_notu=notu,
+            )
+        except study_sessions.CalismaOturumHatasi as hata:
+            _calisma_hata_goster(hata)
+        else:
+            st.session_state.pop(CALISMA_BITIR_ANAHTARI, None)
+            set_flash_message("success", "✅ Çalışma kaydedildi.")
+            st.rerun()
+
+
+def _gercek_calisma_ozeti(ogrenci_id, aktif_oturum):
+    """Bugün / bu hafta GERÇEK çalışma metrikleri + ders bazlı özet."""
+    ozet = study_sessions.gunluk_haftalik_ozet(ogrenci_id)
+    col_1, col_2, col_3 = st.columns(3)
+    col_1.metric("⏱️ Bugün", dakika_bicimle(ozet["bugun_dk"]))
+    col_2.metric("📅 Bu hafta", dakika_bicimle(ozet["hafta_dk"]))
+    col_3.metric("✍️ Bu hafta çözülen soru", f"{ozet['hafta_soru']}")
+    if aktif_oturum:
+        devam_dk = int(study_sessions.gecen_saniye(aktif_oturum) // 60)
+        st.caption(
+            f"⏳ Devam eden çalışma: {dakika_bicimle(devam_dk)}"
+            " (bitirince toplama eklenir)"
+        )
+
+    dersler = study_sessions.ders_bazli_ozet(ogrenci_id, gun_sayisi=7)
+    with st.expander("📊 Derslere göre gerçek çalışma (son 7 gün)"):
+        if dersler:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Ders": d["ders"],
+                            "Süre": dakika_bicimle(d["dk"]),
+                            "Çözülen soru": d["soru"],
+                            "Oturum": d["oturum"],
+                        }
+                        for d in dersler
+                    ]
+                ),
+                hide_index=True,
+            )
+        else:
+            st.caption("Son 7 günde kaydedilmiş tamamlanmış çalışma yok.")
+        gecmis = study_sessions.oturum_gecmisi(ogrenci_id, limit=5)
+        if gecmis:
+            st.markdown("**Son çalışmalar**")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Tarih": (
+                                o.get("bitis_zamani")
+                                or o.get("baslangic_zamani")
+                                or ""
+                            )[:16],
+                            "Ders": o.get("ders") or "-",
+                            "Konu": o.get("mikro_konu") or "-",
+                            "Süre": f"{int(o.get('gercek_sure_dk') or 0)} dk",
+                            "Soru": int(o.get("cozulen_soru") or 0),
+                            "Not": (o.get("ogrenci_notu") or "")[:40],
+                        }
+                        for o in gecmis
+                    ]
+                ),
+                hide_index=True,
+            )
+
+
+def _gorev_gercek_soru_ozeti(gorev, ogrenci_id):
+    """Planlanan / gerçekleşen / kalan soru özeti (görev kartının altı)."""
+    g_id = int(gorev["id"])
+    plan = int(gorev.get("hedef_soru") or 0)
+    gercek = study_sessions.gorev_cozulen_soru(ogrenci_id, g_id)
+    if plan <= 0 and not gercek["cozulen"] and not gercek["sure_dk"]:
+        return
+    parcalar = []
+    if plan > 0:
+        parcalar.append(f"Planlanan {plan} soru")
+    parcalar.append(f"Gerçekleşen {gercek['cozulen']} soru")
+    if plan > 0:
+        parcalar.append(f"Kalan {max(0, plan - gercek['cozulen'])} soru")
+    if gercek["sure_dk"]:
+        parcalar.append(f"{dakika_bicimle(gercek['sure_dk'])} çalışma")
+    st.caption("📊 " + " • ".join(parcalar))
+
+
+def _calisma_basla_butonu(gorev, ogrenci_id):
+    """Görev kartındaki 'Çalışmaya Başla' butonu."""
+    g_id = int(gorev["id"])
+    if st.button("▶️ Çalışmaya Başla", key=f"calisma_basla_{g_id}", type="primary"):
+        try:
+            study_sessions.oturum_baslat(
+                ogrenci_id,
+                gorev_id=g_id,
+                ders=gorev.get("ders"),
+                makro_konu=gorev.get("makro_konu"),
+                mikro_konu=gorev.get("mikro_konu"),
+                alt_konu=gorev.get("alt_konu"),
+            )
+        except study_sessions.CalismaOturumHatasi as hata:
+            _calisma_hata_goster(hata)
+        else:
+            st.rerun()
+
+
+def _oturum_paneli_veya_form(oturum, planlanan_soru=0):
+    """Bitirme ekranı istenmişse formu, aksi hâlde sayacı gösterir."""
+    if st.session_state.get(CALISMA_BITIR_ANAHTARI) == oturum["id"]:
+        _oturum_bitirme_formu(oturum, planlanan_soru)
+    else:
+        _aktif_oturum_paneli(oturum)
+
+
+# ==============================================================================
 # TAB 1: BUGÜNÜN GÖREVLERİ (ODAK EKRANI)
 # ==============================================================================
 with tab1:
@@ -4834,11 +5679,22 @@ with tab1:
 
     with get_connection() as conn:
         df_bugun = pd.read_sql_query(
-            "SELECT id, ders, makro_konu, mikro_konu, gorev_tanimi, hedef_soru, pedagoji_turu, durum "
+            "SELECT id, ders, makro_konu, mikro_konu, alt_konu, gorev_tanimi, hedef_soru, "
+            "pedagoji_turu, durum "
             "FROM calisma_programi_gorevler WHERE ogrenci_id = ? AND (tarih = ? OR gun = ?)",
             conn,
             params=(current_user["id"], bugun_str, bugun_gun_adi),
         )
+
+    # FAZ 4: aktif çalışma oturumu veritabanından okunur; sayfa yenilense,
+    # başka sekmeye geçilse veya uygulama kapansa da kaybolmaz.
+    ogrenci_id = current_user["id"]
+    aktif_oturum = study_sessions.aktif_oturum_getir(ogrenci_id)
+    gosterilen_gorevler = set()
+
+    st.markdown("#### ⏱️ Gerçek Çalışma Özeti")
+    _gercek_calisma_ozeti(ogrenci_id, aktif_oturum)
+    st.markdown("---")
 
     if not df_bugun.empty:
         biten_cnt = len(df_bugun[df_bugun["durum"] == 1])
@@ -4870,10 +5726,13 @@ with tab1:
 
             col_chk1, col_chk2 = st.columns([4, 1])
             with col_chk2:
+                chk_anahtar = f"focus_chk_{g_id}"
+                # FAZ 4: aynı görev haftalık program sekmesinde de
+                # işaretlenebildiği için oturum değeri veritabanıyla eşitlenir.
+                gorev_chk_durum_senkron(chk_anahtar, is_done)
                 chk_val = st.checkbox(
                     "Tamamladım",
-                    value=is_done,
-                    key=f"focus_chk_{g_id}",
+                    key=chk_anahtar,
                 )
                 if chk_val != is_done:
                     with get_connection() as conn:
@@ -4888,10 +5747,41 @@ with tab1:
                         "TASK_TOGGLE_FOCUS",
                         f"Gorev ID {g_id} -> {chk_val}",
                     )
-                    soru_ilerleme_isle(g_id, chk_val)
+                    # FAZ 4: checkbox yalnızca görev durumunu değiştirir.
+                    # Soru ilerlemesi planlanan sorudan DEĞİL, gerçek çalışma
+                    # oturumlarından hesaplanır (soru_ilerleme_isle kaldırıldı).
                     gorev_alt_konu_isle(g_id, chk_val)
                     st.rerun()
+
+            # FAZ 4: görev kartının altında çalışma zamanlayıcısı
+            gosterilen_gorevler.add(int(g_id))
+            if aktif_oturum and int(aktif_oturum.get("gorev_id") or 0) == int(g_id):
+                _oturum_paneli_veya_form(
+                    aktif_oturum, int(g_row.get("hedef_soru") or 0)
+                )
+            else:
+                _gorev_gercek_soru_ozeti(g_row, ogrenci_id)
+                _calisma_basla_butonu(g_row, ogrenci_id)
+                if aktif_oturum:
+                    st.caption(
+                        "⏳ Başka bir görevde çalışma sürüyor; önce onu"
+                        " bitirin veya iptal edin."
+                    )
+
+        # Aktif oturum bugünün listesinde olmayan bir göreve aitse yine
+        # görünür olsun (görev silinse bile çalışma kaybolmaz).
+        if (
+            aktif_oturum
+            and int(aktif_oturum.get("gorev_id") or 0) not in gosterilen_gorevler
+        ):
+            st.markdown("---")
+            st.markdown("#### ⏳ Devam eden çalışma")
+            _oturum_paneli_veya_form(aktif_oturum)
     else:
+        if aktif_oturum:
+            st.markdown("#### ⏳ Devam eden çalışma")
+            _oturum_paneli_veya_form(aktif_oturum)
+            st.markdown("---")
         st.info("💡 Bugüne tanımlanmış henüz bir çalışma görevi bulunmuyor. 'Tab 5: Haftalık Çalışma Programı' sekmesinden akıllı programınızı tek tıkla oluşturabilirsiniz!")
 
 
@@ -5085,6 +5975,8 @@ with tab3:
             unsafe_allow_html=True,
         )
         col_w1, col_w2 = st.columns(2)
+        ders_girdileri = []
+        ders_hatalari = []
         with col_w1:
             st.session_state.wiz_kategori = st.radio(
                 "Deneme Türü:", ["Genel Deneme", "Branş Denemesi"], horizontal=True
@@ -5155,45 +6047,243 @@ with tab3:
                     value=min(25.0, max_net_val),
                     step=0.25,
                 )
+                # FAZ 3: branş sonucu ders tablosuna bağlanır. Doğru/yanlış
+                # girilirse net otomatik hesaplanır ve başlığa o değer yazılır.
+                wiz_brans_detay = None
+                with st.expander("🔍 Ders Detayı (opsiyonel)", expanded=False):
+                    st.caption(
+                        "Doğru / yanlış sayılarınızı girerseniz net"
+                        " **Doğru − Yanlış/4** olarak otomatik hesaplanır ve"
+                        " ders bazlı grafikte görünür. Girmezseniz yalnızca"
+                        " toplam branş neti kaydedilir."
+                    )
+                    detay_col1, detay_col2 = st.columns(2)
+                    with detay_col1:
+                        detay_soru = st.number_input(
+                            "Soru Sayısı:",
+                            min_value=DERS_SONUC_MIN_SORU,
+                            max_value=DERS_SONUC_MAKS_SORU,
+                            value=40 if st.session_state.wiz_tur != "YDT" else 80,
+                            step=1,
+                            key="wiz_brans_soru",
+                        )
+                        detay_dogru = st.number_input(
+                            "Doğru:",
+                            min_value=0,
+                            max_value=DERS_SONUC_MAKS_SORU,
+                            value=0,
+                            step=1,
+                            key="wiz_brans_dogru",
+                        )
+                    with detay_col2:
+                        detay_yanlis = st.number_input(
+                            "Yanlış:",
+                            min_value=0,
+                            max_value=DERS_SONUC_MAKS_SORU,
+                            value=0,
+                            step=1,
+                            key="wiz_brans_yanlis",
+                        )
+                        detay_bos = st.number_input(
+                            "Boş:",
+                            min_value=0,
+                            max_value=DERS_SONUC_MAKS_SORU,
+                            value=0,
+                            step=1,
+                            key="wiz_brans_bos",
+                        )
+                    if detay_dogru + detay_yanlis > 0:
+                        try:
+                            wiz_brans_detay = ders_sonucu_dogrula(
+                                secilen_brans,
+                                detay_dogru,
+                                detay_yanlis,
+                                detay_bos,
+                                detay_soru,
+                            )
+                        except ValueError as detay_hata:
+                            st.error(f"⚠️ {detay_hata}")
+                            wiz_brans_detay = None
+                        if wiz_brans_detay:
+                            st.session_state.wiz_net = wiz_brans_detay["net"]
+                            st.info(
+                                "Doğru/yanlışa göre hesaplanan net:"
+                                f" **{wiz_brans_detay['net']:.2f}** — kayıtta bu"
+                                " değer kullanılacak."
+                            )
+                st.session_state.wiz_brans_detay = wiz_brans_detay
+                st.session_state.wiz_ders_sonuclari = (
+                    [wiz_brans_detay] if wiz_brans_detay else []
+                )
             else:
                 st.session_state.wiz_brans_dersi = None
-                max_genel_net = (
-                    120.0 if st.session_state.wiz_tur == "TYT" else 80.0
+                st.session_state.wiz_brans_detay = None
+                ders_secenekleri = genel_ders_secenekleri(
+                    st.session_state.wiz_tur, ogrenci_alan
                 )
-                st.session_state.wiz_net = st.number_input(
-                    "Toplam Netiniz:",
-                    min_value=0.0,
-                    max_value=max_genel_net,
-                    value=min(75.0, max_genel_net),
-                    step=0.25,
+                mod_secenekleri = ["Ders Bazlı", "Sadece Toplam Net"]
+                if not ders_secenekleri:
+                    mod_secenekleri = ["Sadece Toplam Net"]
+                if st.session_state.get("wiz_ders_modu") not in mod_secenekleri:
+                    st.session_state.wiz_ders_modu = mod_secenekleri[0]
+                # FAZ 3: genel denemenin ders bazlı netleri. Net her zaman
+                # doğru/yanlıştan hesaplanır; aynı bilgi ikinci kez sorulmaz.
+                st.radio(
+                    "Genel Deneme Giriş Yöntemi:",
+                    options=mod_secenekleri,
+                    horizontal=True,
+                    key="wiz_ders_modu",
+                    help=(
+                        "Ders bazlı sonuçlarınız varsa her ders için doğru /"
+                        " yanlış / boş girin. Elinizde ders kırılımı yoksa"
+                        " 'Sadece Toplam Net' seçeneğini kullanın."
+                    ),
                 )
-        if st.button("İleri ➔ Ders Seçimine Geç", type="primary"):
-            if st.session_state.wiz_adi.strip():
-                if st.session_state.wiz_kategori == "Branş Denemesi":
-                    st.session_state.wiz_selected_dersler = [
-                        st.session_state.wiz_brans_dersi
-                    ]
-                    queue = []
-                    mak_dict = aktif_mufredat_hiyerarsisi.get(
-                        st.session_state.wiz_brans_dersi, {}
+                if st.session_state.wiz_ders_modu == "Ders Bazlı":
+                    st.caption(
+                        "Her ders için doğru / yanlış / boş sayısını girin."
+                        " Netler otomatik hesaplanır; boş bıraktığınız ders"
+                        " kaydedilmez."
                     )
-                    if isinstance(mak_dict, dict):
-                        for mak_k, mik_v in mak_dict.items():
-                            queue.append({
-                                "ders": st.session_state.wiz_brans_dersi,
-                                "makro": mak_k,
-                                "mikro_listesi": mik_v,
-                            })
-                    st.session_state.wiz_queue = queue
-                    st.session_state.wiz_card_idx = 0
-                    st.session_state.wiz_show_details = False
-                    st.session_state.wiz_step = 3
-                    st.rerun()
+                    if st.session_state.wiz_tur == "AYT":
+                        st.caption(
+                            "ℹ️ ÖSYM düzeninde AYT Geometri soruları Matematik"
+                            " Testinin içindedir (toplam 40 soru); bu yüzden"
+                            " ayrı geometri satırı yoktur. Geometriyi ayrı"
+                            " takip etmek isterseniz branş denemesi girin."
+                        )
+                    varsayilan_satirlar = [
+                        {
+                            "Ders": d_ad,
+                            "Soru Sayısı": int(soru),
+                            "Doğru": 0,
+                            "Yanlış": 0,
+                            "Boş": 0,
+                        }
+                        for d_ad, soru in ders_secenekleri
+                    ]
+                    duzenlenen = st.data_editor(
+                        pd.DataFrame(varsayilan_satirlar),
+                        key=(
+                            "wiz_ders_editor_"
+                            + sanitize_key(st.session_state.wiz_tur)
+                            + "_"
+                            + sanitize_key(
+                                ders_secenekleri[0][0] if ders_secenekleri else "x"
+                            )
+                        ),
+                        hide_index=True,
+                        disabled=["Ders"],
+                        column_config={
+                            "Ders": st.column_config.TextColumn("Ders"),
+                            "Soru Sayısı": st.column_config.NumberColumn(
+                                "Soru Sayısı",
+                                min_value=DERS_SONUC_MIN_SORU,
+                                max_value=DERS_SONUC_MAKS_SORU,
+                                step=1,
+                                help="Dersin toplam soru sayısı",
+                            ),
+                            "Doğru": st.column_config.NumberColumn(
+                                "Doğru", min_value=0, max_value=DERS_SONUC_MAKS_SORU, step=1
+                            ),
+                            "Yanlış": st.column_config.NumberColumn(
+                                "Yanlış", min_value=0, max_value=DERS_SONUC_MAKS_SORU, step=1
+                            ),
+                            "Boş": st.column_config.NumberColumn(
+                                "Boş", min_value=0, max_value=DERS_SONUC_MAKS_SORU, step=1
+                            ),
+                        },
+                    )
+                    for _, satir in duzenlenen.iterrows():
+                        try:
+                            kayit = ders_sonucu_dogrula(
+                                satir.get("Ders"),
+                                satir.get("Doğru"),
+                                satir.get("Yanlış"),
+                                satir.get("Boş"),
+                                satir.get("Soru Sayısı"),
+                            )
+                        except ValueError as satir_hata:
+                            ders_hatalari.append(str(satir_hata))
+                            continue
+                        if kayit["dogru"] + kayit["yanlis"] + kayit["bos"] == 0:
+                            continue
+                        ders_girdileri.append(kayit)
+                    toplam_ders_neti = ders_toplam_neti(ders_girdileri)
+                    olcu1, olcu2 = st.columns(2)
+                    olcu1.metric(
+                        "Derslerden Hesaplanan Toplam Net",
+                        f"{toplam_ders_neti:.2f}",
+                    )
+                    olcu2.metric(
+                        "Sonuç Girilen Ders",
+                        f"{len(ders_girdileri)} / {len(ders_secenekleri)}",
+                    )
+                    if ders_girdileri:
+                        st.caption(
+                            "Ders netleri: "
+                            + " • ".join(
+                                f"{g['ders']} {g['net']:.2f}"
+                                for g in ders_girdileri
+                            )
+                        )
+                    for hata_metni in ders_hatalari:
+                        st.error(f"⚠️ {hata_metni}")
+                    st.session_state.wiz_net = toplam_ders_neti
+                    st.session_state.wiz_ders_sonuclari = ders_girdileri
                 else:
-                    st.session_state.wiz_step = 2
-                    st.rerun()
-            else:
+                    max_genel_net = (
+                        120.0 if st.session_state.wiz_tur == "TYT" else 80.0
+                    )
+                    st.session_state.wiz_net = st.number_input(
+                        "Toplam Netiniz:",
+                        min_value=0.0,
+                        max_value=max_genel_net,
+                        value=min(75.0, max_genel_net),
+                        step=0.25,
+                    )
+                    st.session_state.wiz_ders_sonuclari = []
+        if st.button("İleri ➔ Ders Seçimine Geç", type="primary"):
+            if not st.session_state.wiz_adi.strip():
                 st.error("Lütfen denemenin adını giriniz!")
+            elif ders_hatalari:
+                st.error(
+                    "Ders sonuçlarında hata var, lütfen düzeltiniz: "
+                    + " | ".join(ders_hatalari)
+                )
+            elif (
+                st.session_state.wiz_kategori == "Genel Deneme"
+                and st.session_state.get("wiz_ders_modu") == "Ders Bazlı"
+                and not st.session_state.wiz_ders_sonuclari
+            ):
+                st.error(
+                    "Ders bazlı giriş seçtiniz ancak hiçbir derse sonuç"
+                    " girmediniz. En az bir ders için doğru/yanlış girin ya da"
+                    " 'Sadece Toplam Net' seçeneğine geçin."
+                )
+            elif st.session_state.wiz_kategori == "Branş Denemesi":
+                st.session_state.wiz_selected_dersler = [
+                    st.session_state.wiz_brans_dersi
+                ]
+                queue = []
+                mak_dict = aktif_mufredat_hiyerarsisi.get(
+                    st.session_state.wiz_brans_dersi, {}
+                )
+                if isinstance(mak_dict, dict):
+                    for mak_k, mik_v in mak_dict.items():
+                        queue.append({
+                            "ders": st.session_state.wiz_brans_dersi,
+                            "makro": mak_k,
+                            "mikro_listesi": mik_v,
+                        })
+                st.session_state.wiz_queue = queue
+                st.session_state.wiz_card_idx = 0
+                st.session_state.wiz_show_details = False
+                st.session_state.wiz_step = 3
+                st.rerun()
+            else:
+                st.session_state.wiz_step = 2
+                st.rerun()
 
     elif st.session_state.wiz_step == 2:
         st.markdown(
@@ -5279,6 +6369,9 @@ with tab3:
                         net_bilgisi=float(st.session_state.wiz_net or 0.0),
                         tarih=st.session_state.wiz_tarih,
                         yanlislar=st.session_state.wiz_draft_mistakes,
+                        ders_sonuclari=list(
+                            st.session_state.get("wiz_ders_sonuclari") or []
+                        ),
                     )
             except Exception as kayit_hatasi:
                 kayit_sonuc["hata"] = str(kayit_hatasi)
@@ -5429,6 +6522,17 @@ with tab3:
                 f"Deneme ID: {kayit_sonuc.get('deneme_id')} • Tarih:"
                 f" {st.session_state.wiz_tarih}"
             )
+            kaydedilen_dersler = list(
+                st.session_state.get("wiz_ders_sonuclari") or []
+            )
+            if kaydedilen_dersler:
+                st.caption(
+                    f"Ders bazlı {len(kaydedilen_dersler)} sonuç kaydedildi: "
+                    + " • ".join(
+                        f"{d['ders']} {float(d['net']):.2f}"
+                        for d in kaydedilen_dersler
+                    )
+                )
         if drafts:
             st.subheader("📌 Çalışma Listesine Eklenen Konular:")
             st.dataframe(pd.DataFrame(drafts), width="stretch")
@@ -5446,16 +6550,20 @@ with tab3:
             st.session_state.wiz_show_details = False
             st.session_state.wiz_kayit_sonuc = None
             st.session_state.wiz_brans_dersi = ""
+            st.session_state.wiz_brans_detay = None
+            st.session_state.wiz_ders_sonuclari = []
+            st.session_state.wiz_ders_modu = "Ders Bazlı"
             st.rerun()
 
     st.markdown("---")
     st.subheader("📊 Net Gelişim Grafikleri ve Filtreleme")
-    
-    # FAZ 2: Grafikler artık yalnızca `denemeler` tablosundan beslenir.
-    # Genel deneme (TYT / AYT) ve her branş denemesi AYRI seridir; genel ve
-    # branşı birleştiren "Tümü" filtresi kaldırıldı, kullanıcı seriyi seçer.
+
+    # FAZ 2: Grafikler `denemeler` tablosundan, FAZ 3 ders bazlı seriler
+    # `deneme_ders_sonuclari` tablosundan beslenir. Genel deneme (TYT / AYT),
+    # genel denemenin ders netleri ve her branş denemesi AYRI seridir.
     with get_connection() as conn:
         df_denemeler = denemeleri_getir(conn, current_user["id"])
+        df_ders_sonuclari = deneme_ders_sonuclari_getir(conn, current_user["id"])
         baglanmamis_adet = baglanmamis_yanlis_sayisi(conn, current_user["id"])
 
     if baglanmamis_adet:
@@ -5477,9 +6585,9 @@ with tab3:
         on_change="rerun",
     )
 
-    def _deneme_grafigi(df_kaynak, sinav_turu, selectbox_key):
-        """Tek bir deneme serisini (genel veya branş) kronolojik çizer."""
-        secenekler = grafik_seri_secenekleri(df_kaynak, sinav_turu)
+    def _deneme_grafigi(df_kaynak, df_ders, sinav_turu, selectbox_key):
+        """Tek bir seriyi (genel toplam / ders bazlı / branş) kronolojik çizer."""
+        secenekler = grafik_seri_secenekleri(df_kaynak, sinav_turu, df_ders)
         if not secenekler:
             st.info(f"Henüz {sinav_turu} denemesi kaydı bulunmuyor.")
             return
@@ -5491,30 +6599,109 @@ with tab3:
         secenek = next(
             (s for s in secenekler if s["etiket"] == etiket), secenekler[0]
         )
-        seri = seri_filtrele(
-            df_kaynak, secenek["kategori"], secenek["brans_dersi"]
-        )
+        if secenek.get("kaynak") == "ders":
+            seri = ders_net_serisi(
+                df_ders, sinav_turu, secenek["ders"], secenek["kategori"]
+            )
+            net_kolonu = "net"
+        else:
+            seri = seri_filtrele(
+                df_kaynak, secenek["kategori"], secenek["brans_dersi"]
+            )
+            net_kolonu = "net_bilgisi"
         if seri is None or seri.empty:
             st.info("Bu seride gösterilecek deneme bulunamadı.")
             return
-        grafik_df = seri[["tarih", "net_bilgisi"]].rename(
-            columns={"net_bilgisi": secenek["etiket"]}
+        grafik_df = seri[["tarih", net_kolonu]].rename(
+            columns={net_kolonu: secenek["etiket"]}
         )
         st.line_chart(grafik_df.set_index("tarih"))
+
+        # FAZ 3: özet metrikler. Yetersiz veride ortalama/gelişim gösterilmez.
+        ozet = net_ozeti(seri[net_kolonu].tolist())
+        olcu1, olcu2, olcu3, olcu4 = st.columns(4)
+        olcu1.metric("Deneme Sayısı", ozet["adet"])
+        olcu2.metric(
+            "Son Net", "—" if ozet["son"] is None else f"{ozet['son']:.2f}"
+        )
+        olcu3.metric(
+            "En Yüksek Net",
+            "—" if ozet["en_yuksek"] is None else f"{ozet['en_yuksek']:.2f}",
+        )
+        olcu4.metric(
+            "Son 3 Ortalama",
+            "—"
+            if ozet["son_uc_ortalama"] is None
+            else f"{ozet['son_uc_ortalama']:.2f}",
+        )
+        if ozet["adet"] < 3:
+            st.caption(
+                "ℹ️ Son 3 deneme ortalaması için en az 3 deneme gerekir"
+                f" (şu an {ozet['adet']})."
+            )
+        elif ozet["gelisim"] is None:
+            st.caption(
+                "ℹ️ Gelişim yorumu için en az 6 deneme gerekir"
+                f" (şu an {ozet['adet']})."
+            )
+        else:
+            yon = "▲" if ozet["gelisim"] >= 0 else "▼"
+            st.caption(
+                f"Gelişim: son 3 ortalama, önceki 3 ortalamaya göre"
+                f" {yon} {abs(ozet['gelisim']):.2f} net."
+            )
         st.caption(
             f"{len(seri)} deneme • X ekseni deneme tarihi • aynı adlı"
             " denemeler ayrı nokta olarak gösterilir."
         )
         with st.expander("📋 Grafik Noktaları (Tarih • Deneme Adı • Net)"):
-            tablo = seri[["id", "tarih", "deneme_adi", "net_bilgisi"]].copy()
+            id_kolonu = "deneme_id" if secenek.get("kaynak") == "ders" else "id"
+            tablo = seri[[id_kolonu, "tarih", "deneme_adi", net_kolonu]].copy()
             tablo.columns = ["Deneme ID", "Tarih", "Deneme Adı", "Net"]
+            if secenek.get("kaynak") == "ders":
+                tablo.insert(3, "Ders", secenek["ders"])
             st.dataframe(tablo, width="stretch", hide_index=True)
 
+    # FAZ 3: ders bazlı performans özeti (genel denemeler).
+    if df_ders_sonuclari is not None and not df_ders_sonuclari.empty:
+        with st.expander("📚 Ders Bazlı Performans Özeti", expanded=False):
+            ozet_satirlari = []
+            for ozet_tur in ("TYT", hedef_ayt_turu):
+                for ozet_ders in ders_seri_listesi(df_ders_sonuclari, ozet_tur):
+                    alt_seri = ders_net_serisi(df_ders_sonuclari, ozet_tur, ozet_ders)
+                    alt_ozet = net_ozeti(alt_seri["net"].tolist())
+                    ozet_satirlari.append({
+                        "Sınav": ozet_tur,
+                        "Ders": ozet_ders,
+                        "Deneme": alt_ozet["adet"],
+                        "Son Net": alt_ozet["son"],
+                        "Son 3 Ort.": alt_ozet["son_uc_ortalama"],
+                        "En Yüksek": alt_ozet["en_yuksek"],
+                    })
+            if ozet_satirlari:
+                st.dataframe(
+                    pd.DataFrame(ozet_satirlari),
+                    width="stretch",
+                    hide_index=True,
+                )
+                st.caption(
+                    "Ortalama ve gelişim yalnızca yeterli deneme sayısına"
+                    " ulaşıldığında gösterilir."
+                )
+            else:
+                st.info(
+                    "Genel denemelerde ders bazlı sonuç bulunmuyor. Yeni"
+                    " denemeleri ders bazlı girerek burada gelişimi"
+                    " izleyebilirsiniz."
+                )
+
     with grafik_tab1:
-        _deneme_grafigi(df_denemeler, "TYT", "kt_tyt_seri")
+        _deneme_grafigi(df_denemeler, df_ders_sonuclari, "TYT", "kt_tyt_seri")
 
     with grafik_tab2:
-        _deneme_grafigi(df_denemeler, hedef_ayt_turu, "kt_ayt_seri")
+        _deneme_grafigi(
+            df_denemeler, df_ders_sonuclari, hedef_ayt_turu, "kt_ayt_seri"
+        )
 
     with grafik_tab3:
         with get_connection() as conn:
@@ -6142,14 +7329,17 @@ with tab5:
                             )
                         with col_g2:
                             is_t = bool(row["durum"])
+                            prog_anahtar = f"prog_chk_{row['id']}"
+                            # FAZ 4: iki sekme arasındaki checkbox değeri
+                            # çakışmasını (sonsuz rerun) önler.
+                            gorev_chk_durum_senkron(prog_anahtar, is_t)
                             chk_g = st.checkbox(
                                 "Tamamlandı",
-                                value=is_t,
-                                key=f"prog_chk_{row['id']}",
+                                key=prog_anahtar,
                             )
                             if chk_g != is_t:
                                 with get_connection() as conn:
-                                    soru_ilerleme_isle(row["id"], chk_g)
+                                    # FAZ 4: planlanan soru ilerlemeye eklenmez.
                                     gorev_alt_konu_isle(row["id"], chk_g)
                                     cursor = conn.cursor()
                                     cursor.execute(
