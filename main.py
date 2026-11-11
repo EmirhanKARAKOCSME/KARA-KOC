@@ -260,6 +260,498 @@ def log_islem(ogrenci_id, islem, detay):
         pass
 
 
+# ==============================================================================
+# FAZ 2: DENEME VERİ MODELİ (BAŞLIK TABLOSU + YANLIŞ DETAYLARI) VE MİGRASYON
+# ==============================================================================
+DENEME_KATEGORI_GENEL = "Genel Deneme"
+DENEME_KATEGORI_BRANS = "Branş Denemesi"
+DENEME_KATEGORILERI = [DENEME_KATEGORI_GENEL, DENEME_KATEGORI_BRANS]
+DENEME_TURLERI = ["TYT", "AYT", "YDT"]
+DENEME_KAYNAK_WIZARD = "wizard"
+DENEME_KAYNAK_MIGRASYON = "migrasyon"
+
+
+def kategori_normalize(deger):
+    """'Genel' / 'Genel Deneme' / 'Branş Denemesi' -> kanonik kategori adı."""
+    metin = str(deger or "").strip()
+    if metin in (DENEME_KATEGORI_BRANS, "Branş", "Brans Denemesi", "Brans"):
+        return DENEME_KATEGORI_BRANS
+    if metin in (DENEME_KATEGORI_GENEL, "Genel"):
+        return DENEME_KATEGORI_GENEL
+    return None
+
+
+def tur_normalize(deger):
+    """Sınav türünü TYT / AYT / YDT olarak döndürür (geçersizse None)."""
+    metin = str(deger or "").strip().upper()
+    return metin if metin in DENEME_TURLERI else None
+
+
+# Maarif modeli (9/10. sınıf) müfredatında TYT dersleri öneksiz adlandırılır.
+TYT_ONEKSIZ_DERSLER = ("Matematik ve Veri", "Gramer ve Kelime", "Soru Tipleri")
+
+
+def brans_tur_uyumlu(brans_dersi, deneme_turu):
+    """Branş dersinin sınav türüyle uyumlu olup olmadığını söyler."""
+    brans = str(brans_dersi or "").strip()
+    tur = str(deneme_turu or "").strip().upper()
+    if not brans or tur not in DENEME_TURLERI:
+        return False
+    if brans.upper().startswith(tur):
+        return True
+    if tur == "TYT" and brans in TYT_ONEKSIZ_DERSLER:
+        return True
+    if tur == "YDT" and ("YDT" in brans or "İngilizce" in brans):
+        return True
+    return False
+
+
+def tarih_gunu(deger):
+    """'2026-11-10 10:39:17' veya date/datetime -> 'YYYY-MM-DD'. Geçersizse None."""
+    if deger is None:
+        return None
+    if hasattr(deger, "strftime"):
+        try:
+            return deger.strftime("%Y-%m-%d")
+        except Exception:
+            return None
+    metin = str(deger).strip()
+    if len(metin) >= 10 and re.match(r"^\d{4}-\d{2}-\d{2}", metin):
+        return metin[:10]
+    for kalip in ("%d/%m/%Y", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(metin, kalip).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+def deneme_kaydet(
+    conn,
+    ogrenci_id,
+    deneme_adi,
+    deneme_kategorisi,
+    deneme_turu,
+    brans_dersi,
+    net_bilgisi,
+    tarih,
+    yanlislar=None,
+    dogru_adedi=None,
+    yanlis_adedi=None,
+    bos_adedi=None,
+    sure_dk=None,
+    kayit_kaynagi=DENEME_KAYNAK_WIZARD,
+):
+    """Deneme başlığını ve (varsa) yanlış detaylarını TEK transaction'da yazar.
+
+    - Başlık, yanlış listesi boş olsa bile mutlaka oluşturulur.
+    - Genel denemede `brans_dersi` NULL'a zorlanır; branş denemesinde zorunludur.
+    - Hata olursa SAVEPOINT ile geri alınır, yarım kayıt kalmaz.
+
+    Dönüş: oluşturulan `denemeler.id`
+    """
+    yanlislar = list(yanlislar or [])
+    ad = str(deneme_adi or "").strip()
+    if not ad:
+        raise ValueError("Deneme adı boş olamaz.")
+
+    kategori = kategori_normalize(deneme_kategorisi)
+    if kategori is None:
+        raise ValueError(f"Geçersiz deneme kategorisi: {deneme_kategorisi!r}")
+
+    tur = tur_normalize(deneme_turu)
+    if tur is None:
+        raise ValueError(f"Geçersiz deneme türü: {deneme_turu!r}")
+
+    brans = str(brans_dersi or "").strip() or None
+    if kategori == DENEME_KATEGORI_GENEL:
+        brans = None
+    elif brans is None:
+        raise ValueError("Branş denemesinde branş dersi zorunludur.")
+    elif not brans_tur_uyumlu(brans, tur):
+        raise ValueError(f"'{brans}' dersi {tur} sınav türüyle uyumlu değil.")
+
+    gun = tarih_gunu(tarih)
+    if gun is None:
+        raise ValueError(f"Geçersiz deneme tarihi: {tarih!r}")
+
+    try:
+        net = float(net_bilgisi if net_bilgisi is not None else 0.0)
+    except (TypeError, ValueError) as hata:
+        raise ValueError("Net bilgisi sayısal olmalıdır.") from hata
+    if net < 0:
+        raise ValueError("Net bilgisi negatif olamaz.")
+
+    if yanlis_adedi is None:
+        yanlis_adedi = int(sum(int(y.get("yanlis_adedi") or 0) for y in yanlislar))
+
+    simdi_s = get_tr_now().strftime("%Y-%m-%d %H:%M:%S")
+    cur = conn.cursor()
+    cur.execute("SAVEPOINT faz2_deneme_kaydet")
+    try:
+        cur.execute(
+            """INSERT INTO denemeler
+               (ogrenci_id, tarih, deneme_adi, deneme_kategorisi, deneme_turu,
+                brans_dersi, net_bilgisi, dogru_adedi, yanlis_adedi, bos_adedi,
+                sure_dk, kayit_kaynagi, legacy_signature, olusturma_zamani)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+            (
+                ogrenci_id,
+                gun,
+                ad,
+                kategori,
+                tur,
+                brans,
+                net,
+                dogru_adedi,
+                yanlis_adedi,
+                bos_adedi,
+                sure_dk,
+                kayit_kaynagi,
+                simdi_s,
+            ),
+        )
+        deneme_id = cur.lastrowid
+
+        for y in yanlislar:
+            konu = str(y.get("mikro") or y.get("konu_adi") or "").strip()
+            if not konu:
+                continue
+            cur.execute(
+                """INSERT INTO deneme_konu_yanlislari
+                   (ogrenci_id, deneme_kategorisi, brans_dersi, deneme_turu,
+                    deneme_adi, net_bilgisi, ders, makro_konu, konu_adi,
+                    yanlis_adedi, yanlis_nedeni, durum, tarih, deneme_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Aktif', ?, ?)""",
+                (
+                    ogrenci_id,
+                    kategori,
+                    brans,
+                    tur,
+                    ad,
+                    net,
+                    str(y.get("ders") or brans or "").strip(),
+                    y.get("makro"),
+                    konu,
+                    int(y.get("yanlis_adedi") or 0),
+                    y.get("nedenler") or "Konu Eksikliği",
+                    gun,
+                    deneme_id,
+                ),
+            )
+        cur.execute("RELEASE faz2_deneme_kaydet")
+        conn.commit()
+    except Exception:
+        cur.execute("ROLLBACK TO faz2_deneme_kaydet")
+        cur.execute("RELEASE faz2_deneme_kaydet")
+        conn.commit()
+        raise
+    return int(deneme_id)
+
+
+def migrasyon_denemeleri(conn):
+    """Eski `deneme_konu_yanlislari` kayıtlarından `denemeler` başlıkları üretir.
+
+    Eşleştirme imzası: ogrenci_id + TRIM(deneme_adi) + tarih + kategori + tür +
+    brans_dersi + net_bilgisi. Branş denemelerinde `brans_dersi` boşsa ve o
+    denemedeki tüm detaylar TEK bir derse aitse ders üzerinden türetilir; tek
+    derse indirgenemeyen gruplar güvenilmez sayılır ve bağlanmaz.
+
+    Idempotent: `legacy_signature` üzerindeki UNIQUE indeks sayesinde aynı imza
+    için ikinci başlık oluşmaz, deneme_id'si dolu detaylara dokunulmaz.
+    """
+    rapor = {
+        "durum": "calisti",
+        "toplam_detay": 0,
+        "zaten_bagli": 0,
+        "olusturulan_deneme": 0,
+        "baglanan_detay": 0,
+        "eslesmeyen_detay": 0,
+        "eslesmeyen_gruplar": [],
+    }
+    cur = conn.cursor()
+    cur.row_factory = sqlite3.Row
+    cur.execute("SELECT COUNT(*) AS n FROM deneme_konu_yanlislari")
+    rapor["toplam_detay"] = cur.fetchone()["n"]
+    cur.execute(
+        "SELECT COUNT(*) AS n FROM deneme_konu_yanlislari"
+        " WHERE deneme_id IS NOT NULL"
+    )
+    rapor["zaten_bagli"] = cur.fetchone()["n"]
+
+    if rapor["toplam_detay"] == 0 or rapor["zaten_bagli"] >= rapor["toplam_detay"]:
+        rapor["durum"] = "atlandi"
+        return rapor
+
+    satirlar = cur.execute(
+        """SELECT id, ogrenci_id, TRIM(COALESCE(deneme_adi, '')) AS ad,
+                  COALESCE(tarih, '') AS tarih, deneme_kategorisi, deneme_turu,
+                  brans_dersi, ders, net_bilgisi
+           FROM deneme_konu_yanlislari
+           WHERE deneme_id IS NULL
+           ORDER BY id"""
+    ).fetchall()
+
+    gruplar = {}
+    for satir in satirlar:
+        anahtar = (
+            satir["ogrenci_id"],
+            satir["ad"],
+            satir["tarih"],
+            kategori_normalize(satir["deneme_kategorisi"]),
+            tur_normalize(satir["deneme_turu"]),
+            None
+            if satir["net_bilgisi"] is None
+            else round(float(satir["net_bilgisi"]), 4),
+        )
+        gruplar.setdefault(anahtar, []).append(satir)
+
+    simdi_s = get_tr_now().strftime("%Y-%m-%d %H:%M:%S")
+    ogrenci_ozet = {}
+    cur.execute("SAVEPOINT faz2_migrasyon")
+    try:
+        for anahtar, kayitlar in gruplar.items():
+            ogrenci_id, ad, tarih, kategori, tur, net = anahtar
+            idler = [k["id"] for k in kayitlar]
+            acik_branslar = {
+                str(k["brans_dersi"]).strip()
+                for k in kayitlar
+                if k["brans_dersi"] is not None and str(k["brans_dersi"]).strip()
+            }
+            dersler = {
+                str(k["ders"]).strip()
+                for k in kayitlar
+                if str(k["ders"] or "").strip()
+            }
+            brans = None
+            sorun = None
+            if not ad:
+                sorun = "deneme adı boş"
+            elif kategori is None:
+                sorun = "kategori tanımsız"
+            elif tur is None:
+                sorun = "sınav türü tanımsız"
+            elif net is None:
+                sorun = "net bilgisi boş"
+            elif kategori == DENEME_KATEGORI_GENEL:
+                if acik_branslar:
+                    sorun = "genel denemede branş dersi dolu"
+            elif len(acik_branslar) > 1:
+                sorun = "birden fazla branş dersi"
+            elif len(acik_branslar) == 1:
+                brans = next(iter(acik_branslar))
+            elif len(dersler) == 1:
+                brans = next(iter(dersler))
+            else:
+                sorun = "branş dersi türetilemedi"
+
+            if sorun is None and kategori == DENEME_KATEGORI_BRANS:
+                if len(dersler) > 1:
+                    sorun = "branş denemesinde birden fazla ders"
+                elif not brans_tur_uyumlu(brans, tur):
+                    sorun = "branş dersi sınav türüyle uyumlu değil"
+
+
+            if sorun is not None:
+                rapor["eslesmeyen_detay"] += len(idler)
+                rapor["eslesmeyen_gruplar"].append({
+                    "deneme_adi": ad,
+                    "tarih": tarih,
+                    "kategori": kategori,
+                    "tur": tur,
+                    "brans_dersi": brans,
+                    "detay_sayisi": len(idler),
+                    "neden": sorun,
+                })
+                continue
+
+            imza = (
+                f"legacy|{ogrenci_id}|{ad}|{tarih}|{kategori}|{tur}|"
+                f"{brans or '-'}|{net:.2f}"
+            )
+            gun = tarih_gunu(tarih) or tarih
+            cur.execute(
+                """INSERT OR IGNORE INTO denemeler
+                   (ogrenci_id, tarih, deneme_adi, deneme_kategorisi, deneme_turu,
+                    brans_dersi, net_bilgisi, kayit_kaynagi, legacy_signature,
+                    olusturma_zamani)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    ogrenci_id,
+                    gun,
+                    ad,
+                    kategori,
+                    tur,
+                    brans,
+                    net,
+                    DENEME_KAYNAK_MIGRASYON,
+                    imza,
+                    simdi_s,
+                ),
+            )
+            yeni_mi = cur.rowcount > 0
+            cur.execute("SELECT id FROM denemeler WHERE legacy_signature = ?", (imza,))
+            deneme_id = cur.fetchone()["id"]
+            if yeni_mi:
+                rapor["olusturulan_deneme"] += 1
+
+            cur.executemany(
+                "UPDATE deneme_konu_yanlislari SET deneme_id = ?"
+                " WHERE id = ? AND deneme_id IS NULL",
+                [(deneme_id, i) for i in idler],
+            )
+            rapor["baglanan_detay"] += cur.rowcount
+            ozet = ogrenci_ozet.setdefault(ogrenci_id, {"deneme": 0, "detay": 0})
+            ozet["deneme"] += 1
+            ozet["detay"] += len(idler)
+
+        for ogrenci_id, ozet in ogrenci_ozet.items():
+            cur.execute(
+                "INSERT INTO sistem_loglari (ogrenci_id, islem, detay, tarih)"
+                " VALUES (?, ?, ?, ?)",
+                (
+                    ogrenci_id,
+                    "DENEME_MIGRASYON",
+                    f"Eski yanlış kayıtlarından {ozet['deneme']} deneme başlığı"
+                    f" oluşturuldu/eşleştirildi, {ozet['detay']} detay bağlandı.",
+                    simdi_s,
+                ),
+            )
+        cur.execute("RELEASE faz2_migrasyon")
+        conn.commit()
+    except Exception:
+        cur.execute("ROLLBACK TO faz2_migrasyon")
+        cur.execute("RELEASE faz2_migrasyon")
+        conn.commit()
+        raise
+    return rapor
+
+
+def denemeleri_getir(conn, ogrenci_id):
+    """Öğrencinin tüm deneme başlıklarını kronolojik sırada getirir."""
+    return pd.read_sql_query(
+        "SELECT id, tarih, deneme_adi, deneme_kategorisi, deneme_turu,"
+        " brans_dersi, net_bilgisi, dogru_adedi, yanlis_adedi, bos_adedi,"
+        " sure_dk, kayit_kaynagi, legacy_signature"
+        " FROM denemeler WHERE ogrenci_id = ? ORDER BY tarih ASC, id ASC",
+        conn,
+        params=(ogrenci_id,),
+    )
+
+
+def baglanmamis_yanlis_sayisi(conn, ogrenci_id):
+    """deneme_id'si hâlâ NULL olan aktif yanlış detayı sayısı."""
+    satir = conn.execute(
+        "SELECT COUNT(*) FROM deneme_konu_yanlislari WHERE ogrenci_id = ?"
+        " AND deneme_id IS NULL AND (durum IS NULL OR durum = 'Aktif')",
+        (ogrenci_id,),
+    ).fetchone()
+    return int(satir[0] if satir else 0)
+
+
+def grafik_seri_secenekleri(df_denemeler, deneme_turu):
+    """Grafik için ayrık seri seçenekleri: genel deneme + her branş ayrı."""
+    secenekler = []
+    if df_denemeler is None or df_denemeler.empty:
+        return secenekler
+    alt = df_denemeler[df_denemeler["deneme_turu"] == deneme_turu]
+    if alt.empty:
+        return secenekler
+    if not alt[alt["deneme_kategorisi"] == DENEME_KATEGORI_GENEL].empty:
+        secenekler.append(
+            {
+                "etiket": f"{deneme_turu} Genel Deneme",
+                "kategori": DENEME_KATEGORI_GENEL,
+                "brans_dersi": None,
+            }
+        )
+    branslar = {
+        str(b).strip()
+        for b in alt[alt["deneme_kategorisi"] == DENEME_KATEGORI_BRANS][
+            "brans_dersi"
+        ].tolist()
+        if pd.notna(b) and str(b).strip() and str(b) != "None"
+    }
+    for brans in sorted(branslar):
+        secenekler.append(
+            {
+                "etiket": brans,
+                "kategori": DENEME_KATEGORI_BRANS,
+                "brans_dersi": brans,
+            }
+        )
+    return secenekler
+
+
+def seri_filtrele(df_denemeler, kategori, brans_dersi=None):
+    """Tek bir grafik serisini (kategori + branş) kronolojik olarak döndürür."""
+    if df_denemeler is None or df_denemeler.empty:
+        return df_denemeler
+    mask = df_denemeler["deneme_kategorisi"] == kategori
+    if kategori == DENEME_KATEGORI_BRANS:
+        mask = mask & (
+            df_denemeler["brans_dersi"].fillna("").astype(str)
+            == str(brans_dersi or "")
+        )
+    else:
+        mask = mask & df_denemeler["brans_dersi"].isna()
+    return (
+        df_denemeler[mask]
+        .sort_values(["tarih", "id"], kind="stable")
+        .reset_index(drop=True)
+    )
+
+
+def kohort_yanlis_serileri(df_yanlislar):
+    """Bağlı yanlış detaylarını (ders, konu, sınav kohortu) bazında serilere çevirir.
+
+    Kohort = (ders, konu, sınav türü, deneme kategorisi, branş dersi). Böylece
+    TYT genel denemesi ile TYT Matematik branş denemesi, TYT Türkçe ile TYT
+    Matematik ve AYT Matematik ile TYT Matematik asla birleşmez.
+
+    Aynı denemeye ait birden fazla satır TEK nokta sayılır; yanlış adedi aynı
+    konu için MAX ile tekilleştirilir (eski çift kayıt şişirmesi engellenir).
+
+    Dönüş: {(ders, konu, tur, kategori, brans): [{"deneme_id", "tarih",
+            "yanlis", "ids", "neden"}, ...]}  (tarih, sonra deneme_id sırasıyla)
+    """
+    seriler = {}
+    if df_yanlislar is None or len(df_yanlislar.index) == 0:
+        return seriler
+    df = df_yanlislar.copy()
+    for kolon in ("deneme_turu", "deneme_kategorisi", "brans_dersi"):
+        if kolon not in df.columns:
+            df[kolon] = ""
+        df[kolon] = df[kolon].fillna("").astype(str)
+    df["tarih"] = (
+        df["deneme_tarih"].fillna("").astype(str)
+        if "deneme_tarih" in df.columns
+        else ""
+    )
+    for kolon in ("deneme_id", "yanlis_adedi", "id"):
+        df[kolon] = pd.to_numeric(df[kolon], errors="coerce").fillna(0).astype(int)
+
+    for anahtar, grup in df.groupby(
+        ["ders", "konu_adi", "deneme_turu", "deneme_kategorisi", "brans_dersi"],
+        dropna=False,
+    ):
+        noktalar = []
+        for deneme_id, alt in grup.groupby("deneme_id"):
+            neden = (
+                alt["yanlis_nedeni"].iloc[-1] if "yanlis_nedeni" in alt.columns else ""
+            )
+            noktalar.append({
+                "deneme_id": int(deneme_id),
+                "tarih": str(alt["tarih"].iloc[0]),
+                "yanlis": int(alt["yanlis_adedi"].max()),
+                "ids": [int(i) for i in alt["id"].tolist()],
+                "neden": neden,
+            })
+        noktalar.sort(key=lambda n: (n["tarih"], n["deneme_id"]))
+        seriler[anahtar] = noktalar
+    return seriler
+
+
 def init_db():
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -361,6 +853,73 @@ def init_db():
                 FOREIGN KEY(ogrenci_id) REFERENCES ogrenciler(id) ON DELETE CASCADE
             )
         """)
+
+        # FAZ 2: Deneme başlığı ayrı bir varlık olarak tutulur. Yanlış detayları
+        # bu başlığa `deneme_id` ile bağlanır; böylece aynı adı taşıyan iki
+        # deneme asla tek kayıt gibi değerlendirilmez.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS denemeler (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ogrenci_id INTEGER,
+                tarih TEXT,
+                deneme_adi TEXT,
+                deneme_kategorisi TEXT DEFAULT 'Genel Deneme',
+                deneme_turu TEXT,
+                brans_dersi TEXT,
+                net_bilgisi REAL,
+                dogru_adedi INTEGER,
+                yanlis_adedi INTEGER,
+                bos_adedi INTEGER,
+                sure_dk INTEGER,
+                kayit_kaynagi TEXT DEFAULT 'wizard',
+                legacy_signature TEXT,
+                olusturma_zamani TEXT,
+                FOREIGN KEY(ogrenci_id) REFERENCES ogrenciler(id) ON DELETE CASCADE
+            )
+        """)
+
+        # Migrasyonun idempotent olmasını sağlayan kısmi tekil indeks.
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_denemeler_legacy
+            ON denemeler(legacy_signature)
+            WHERE legacy_signature IS NOT NULL
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_denemeler_ogrenci
+            ON denemeler(ogrenci_id, deneme_turu, deneme_kategorisi, brans_dersi)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_denemeler_tarih
+            ON denemeler(ogrenci_id, tarih)
+        """)
+
+        mevcut_kolonlar = [
+            satir[1] for satir in cursor.execute(
+                "PRAGMA table_info(deneme_konu_yanlislari)"
+            )
+        ]
+        if "deneme_id" not in mevcut_kolonlar:
+            cursor.execute(
+                "ALTER TABLE deneme_konu_yanlislari"
+                " ADD COLUMN deneme_id INTEGER REFERENCES denemeler(id)"
+            )
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_deneme_yanlis_deneme_id
+            ON deneme_konu_yanlislari(deneme_id)
+        """)
+
+        # FAZ 2: Eski yanlış kayıtlarını güvenilir imza eşleşmesiyle başlıklara
+        # bağla. Idempotenttir; başarısız olursa hiçbir yarım veri bırakmaz.
+        try:
+            migrasyon_denemeleri(conn)
+        except Exception as hata:
+            cursor.execute(
+                "INSERT INTO sistem_loglari (ogrenci_id, islem, detay, tarih)"
+                " VALUES (NULL, 'DENEME_MIGRASYON_HATA', ?, ?)",
+                (str(hata), get_tr_now().strftime("%Y-%m-%d %H:%M:%S")),
+            )
 
         # Varsayılan Admin Kaydı
         cursor.execute(
@@ -3477,10 +4036,19 @@ def hesapla_tum_alarmlar(ogrenci_id, mevcut_sinif, aktif_mufredat):
             c,
             params=(ogrenci_id,),
         )
+        # FAZ 2: Alarm yalnızca deneme başlığına BAĞLI yanlış kayıtlarıyla
+        # hesaplanır. deneme_id'si NULL olan eski kayıtlar sessizce yutulmaz;
+        # arayüzde "bağlanmamış kayıt" uyarısıyla raporlanır.
         df_yanlislar = pd.read_sql_query(
-            "SELECT id, deneme_adi, tarih, ders, makro_konu, konu_adi, yanlis_adedi, yanlis_nedeni"
-            " FROM deneme_konu_yanlislari WHERE ogrenci_id = ? AND (durum IS"
-            " NULL OR durum = 'Aktif') ORDER BY id ASC",
+            "SELECT y.id, y.deneme_id, y.deneme_adi, y.tarih, y.ders,"
+            " y.makro_konu, y.konu_adi, y.yanlis_adedi, y.yanlis_nedeni,"
+            " d.tarih AS deneme_tarih, d.deneme_turu AS deneme_turu,"
+            " d.deneme_kategorisi AS deneme_kategorisi,"
+            " d.brans_dersi AS brans_dersi"
+            " FROM deneme_konu_yanlislari y"
+            " JOIN denemeler d ON d.id = y.deneme_id"
+            " WHERE y.ogrenci_id = ? AND (y.durum IS NULL OR y.durum = 'Aktif')"
+            " ORDER BY y.id ASC",
             c,
             params=(ogrenci_id,),
         )
@@ -3510,14 +4078,15 @@ def hesapla_tum_alarmlar(ogrenci_id, mevcut_sinif, aktif_mufredat):
     )
 
     if not df_yanlislar.empty:
-        grouped = df_yanlislar.groupby(["ders", "konu_adi"])
-        for (ders, konu), group in grouped:
-            yanlis_ids = group["id"].tolist()
-            # Farklı denemelerdeki performans dizisini al
-            distinct_exams = group.drop_duplicates(subset=["deneme_adi"], keep="last")
-            yanlis_listesi = distinct_exams["yanlis_adedi"].tolist()
+        # FAZ 2: Sınav kohortu bazlı seri. Her nokta TEK bir deneme_id'dir;
+        # sıralama deneme tarihine, eşitlik durumunda deneme_id'ye göredir.
+        kohortler = kohort_yanlis_serileri(df_yanlislar)
+        for (ders, konu, _tur, _kategori, _brans), seri in kohortler.items():
+            yanlis_ids = [i for nokta in seri for i in nokta["ids"]]
+            # Farklı denemelerdeki performans dizisi (deneme_id başına tek nokta)
+            yanlis_listesi = [nokta["yanlis"] for nokta in seri]
             son_yanlis = yanlis_listesi[-1] if yanlis_listesi else 0
-            son_neden = group["yanlis_nedeni"].iloc[-1]
+            son_neden = seri[-1]["neden"] if seri else ""
 
             cta_text = (
                 "Bu konudaki eksiğini haftalarca tek başına kapatmaya çalışmak yerine "
@@ -4495,6 +5064,10 @@ with tab3:
         st.session_state.wiz_draft_mistakes = []
     if "wiz_show_details" not in st.session_state:
         st.session_state.wiz_show_details = False
+    if "wiz_tarih" not in st.session_state:
+        st.session_state.wiz_tarih = get_tr_now().date()
+    if "wiz_kayit_sonuc" not in st.session_state:
+        st.session_state.wiz_kayit_sonuc = None
 
     ogrenci_alan = current_user["hedef_alan"]
     if ogrenci_alan == "Dil":
@@ -4525,6 +5098,14 @@ with tab3:
                 "Deneme Sınavının Adı veya Yayın Evi:",
                 placeholder="Örn: 3D TYT 2. Deneme",
             )
+            # FAZ 2: Denemenin GERÇEK tarihi. Grafik ve alarm sıralaması giriş
+            # sırasına değil bu tarihe göre yapılır.
+            st.session_state.wiz_tarih = st.date_input(
+                "Deneme Tarihi:",
+                value=st.session_state.wiz_tarih,
+                max_value=get_tr_now().date(),
+                format="DD/MM/YYYY",
+            )
         with col_w2:
             if st.session_state.wiz_kategori == "Branş Denemesi":
                 uyumlu_dersler = [
@@ -4553,13 +5134,18 @@ with tab3:
                 ]
                 if not uyumlu_dersler:
                     uyumlu_dersler = list(aktif_mufredat_hiyerarsisi.keys())
-                st.session_state.wiz_brans_dersi = st.selectbox(
-                    "Ders Seçimi:", options=uyumlu_dersler
+                # FAZ 2: TEK branş dersi seçimi. Widget anahtarı ayrı tutulur,
+                # seçim `wiz_brans_dersi` state'ine yazılır; böylece sihirbazın
+                # sonraki adımlarında (widget ekranda yokken) değer korunur.
+                secilen_brans = st.selectbox(
+                    "Branş Dersi Seçimi:",
+                    options=uyumlu_dersler,
+                    key="wiz_brans_secim",
                 )
+                st.session_state.wiz_brans_dersi = secilen_brans
                 max_net_val = (
                     40.0
-                    if "Matematik" in st.session_state.wiz_brans_dersi
-                    or "Türkçe" in st.session_state.wiz_brans_dersi
+                    if "Matematik" in secilen_brans or "Türkçe" in secilen_brans
                     else 80.0
                 )
                 st.session_state.wiz_net = st.number_input(
@@ -4580,16 +5166,6 @@ with tab3:
                     max_value=max_genel_net,
                     value=min(75.0, max_genel_net),
                     step=0.25,
-                )
-            if st.session_state.wiz_kategori == "Branş Denemesi":
-                ders_secenekleri = [
-                    "TYT Türkçe", "TYT Matematik", "TYT Fen", "TYT Sosyal",
-                    "AYT Matematik", "AYT Fizik", "AYT Kimya", "AYT Biyoloji", "AYT Edebiyat"
-                ]
-                st.selectbox(
-                    "Branş Dersi Seçin:",
-                    options=ders_secenekleri,
-                    key="wiz_brans_dersi",
                 )
         if st.button("İleri ➔ Ders Seçimine Geç", type="primary"):
             if st.session_state.wiz_adi.strip():
@@ -4687,6 +5263,34 @@ with tab3:
         queue = st.session_state.wiz_queue
         card_idx = st.session_state.wiz_card_idx
         if card_idx >= len(queue):
+            # FAZ 2: Deneme başlığı + yanlış detayları TEK transaction'da ve
+            # YALNIZCA BİR KEZ burada yazılır. (Eski akışta 4. adım her
+            # rerun'unda yeniden INSERT ediyordu -> çift kayıt.)
+            kayit_sonuc = {"deneme_id": None, "hata": None}
+            try:
+                with get_connection() as _conn:
+                    kayit_sonuc["deneme_id"] = deneme_kaydet(
+                        _conn,
+                        ogrenci_id=current_user["id"],
+                        deneme_adi=st.session_state.wiz_adi,
+                        deneme_kategorisi=st.session_state.wiz_kategori,
+                        deneme_turu=st.session_state.wiz_tur,
+                        brans_dersi=st.session_state.wiz_brans_dersi,
+                        net_bilgisi=float(st.session_state.wiz_net or 0.0),
+                        tarih=st.session_state.wiz_tarih,
+                        yanlislar=st.session_state.wiz_draft_mistakes,
+                    )
+            except Exception as kayit_hatasi:
+                kayit_sonuc["hata"] = str(kayit_hatasi)
+            st.session_state.wiz_kayit_sonuc = kayit_sonuc
+            if kayit_sonuc["hata"] is None:
+                log_islem(
+                    current_user["id"],
+                    "FINISH_EXAM_ANALYSIS",
+                    f"{st.session_state.wiz_adi}:"
+                    f" {len(st.session_state.wiz_draft_mistakes)} yanlış"
+                    f" kaydedildi (deneme_id={kayit_sonuc['deneme_id']}).",
+                )
             st.session_state.wiz_step = 4
             st.rerun()
 
@@ -4805,48 +5409,34 @@ with tab3:
                         st.error("En az 1 alt konu seçiniz!")
 
     elif st.session_state.wiz_step == 4:
-        st.markdown(
-            '<div class="sim-card"><h3>🎉 Deneme Analiziniz'
-            " Kaydedildi!</h3><p><b>"
-            f"[{st.session_state.wiz_kategori}] {st.session_state.wiz_tur} - {st.session_state.wiz_adi} ({st.session_state.wiz_net} Net)</b>"
-            " kaydı oluşturuldu.</p></div>",
-            unsafe_allow_html=True,
-        )
+        kayit_sonuc = st.session_state.wiz_kayit_sonuc or {}
         drafts = st.session_state.wiz_draft_mistakes
-        if drafts:
-            st.subheader("📌 Çalışma Listesine Eklenen Konular:")
-            simdi_s = get_tr_now().strftime("%Y-%m-%d %H:%M:%S")
-            with get_connection() as conn:
-                cursor = conn.cursor()
-                for item in drafts:
-                    cursor.execute(
-                        """INSERT INTO deneme_konu_yanlislari 
-                           (ogrenci_id, deneme_kategorisi, brans_dersi, deneme_turu, deneme_adi, net_bilgisi, ders, makro_konu, konu_adi, yanlis_adedi, yanlis_nedeni, durum, tarih) 
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Aktif', ?)""",
-                        (
-                            current_user["id"],
-                            st.session_state.wiz_kategori,
-                            st.session_state.wiz_brans_dersi,
-                            st.session_state.wiz_tur,
-                            st.session_state.wiz_adi,
-                            st.session_state.wiz_net,
-                            item["ders"],
-                            item["makro"],
-                            item["mikro"],
-                            item["yanlis_adedi"],
-                            item["nedenler"],
-                            simdi_s,
-                        ),
-                    )
-                conn.commit()
-            st.dataframe(pd.DataFrame(drafts), width="stretch")
-            log_islem(
-                current_user["id"],
-                "FINISH_EXAM_ANALYSIS",
-                f"{st.session_state.wiz_adi}: {len(drafts)} yanlış kaydedildi.",
+        if kayit_sonuc.get("hata"):
+            st.error(
+                "❌ Deneme kaydı oluşturulamadı: " + str(kayit_sonuc["hata"])
             )
         else:
-            st.info("Bu denemede yanlış konusu bulunmuyor. Tebrikler!")
+            st.markdown(
+                '<div class="sim-card"><h3>🎉 Deneme Analiziniz'
+                " Kaydedildi!</h3><p><b>"
+                f"[{st.session_state.wiz_kategori}] {st.session_state.wiz_tur} -"
+                f" {st.session_state.wiz_adi}"
+                f" ({st.session_state.wiz_net} Net)</b>"
+                " kaydı oluşturuldu.</p></div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                f"Deneme ID: {kayit_sonuc.get('deneme_id')} • Tarih:"
+                f" {st.session_state.wiz_tarih}"
+            )
+        if drafts:
+            st.subheader("📌 Çalışma Listesine Eklenen Konular:")
+            st.dataframe(pd.DataFrame(drafts), width="stretch")
+        else:
+            st.info(
+                "Bu denemede yanlış konusu bulunmuyor. Deneme kaydı yine de"
+                " oluşturuldu. Tebrikler!"
+            )
 
         if st.button("🚀 Yeni Deneme Ekle", type="primary"):
             st.session_state.wiz_step = 1
@@ -4854,53 +5444,77 @@ with tab3:
             st.session_state.wiz_selected_dersler = []
             st.session_state.wiz_card_idx = 0
             st.session_state.wiz_show_details = False
+            st.session_state.wiz_kayit_sonuc = None
+            st.session_state.wiz_brans_dersi = ""
             st.rerun()
 
     st.markdown("---")
     st.subheader("📊 Net Gelişim Grafikleri ve Filtreleme")
     
-    # BRANŞ VE GENEL DENEME KESİN AYRIM FİLTRESİ
-    kat_filter = st.selectbox(
-        "Grafik İçin Deneme Türü Filtresi:",
-        ["Tümü", "Genel Deneme", "Branş Denemesi"]
-    )
+    # FAZ 2: Grafikler artık yalnızca `denemeler` tablosundan beslenir.
+    # Genel deneme (TYT / AYT) ve her branş denemesi AYRI seridir; genel ve
+    # branşı birleştiren "Tümü" filtresi kaldırıldı, kullanıcı seriyi seçer.
+    with get_connection() as conn:
+        df_denemeler = denemeleri_getir(conn, current_user["id"])
+        baglanmamis_adet = baglanmamis_yanlis_sayisi(conn, current_user["id"])
+
+    if baglanmamis_adet:
+        st.warning(
+            f"⚠️ {baglanmamis_adet} eski yanlış kaydı bir deneme başlığına"
+            " bağlanamadığı için grafik ve alarm hesaplarına dahil edilmedi."
+            " Kayıtlar silinmedi; koçunuzla birlikte kontrol edebilirsiniz."
+        )
+
+    hedef_ayt_turu = "YDT" if current_user["hedef_alan"] == "Dil" else "AYT"
 
     grafik_tab1, grafik_tab2, grafik_tab3 = st.tabs(
-        ["📈 TYT Denemeleri", "📈 AYT Denemeleri", "🔍 Hata Nedenleri"],
+        [
+            "📈 TYT Denemeleri",
+            f"📈 {hedef_ayt_turu} Denemeleri",
+            "🔍 Hata Nedenleri",
+        ],
         key="kt_deneme_grafik_tabs",
         on_change="rerun",
     )
 
-    with grafik_tab1:
-        with get_connection() as conn:
-            query = "SELECT deneme_adi, MAX(net_bilgisi) as net_bilgisi FROM deneme_konu_yanlislari WHERE ogrenci_id = ? AND deneme_turu = 'TYT'"
-            params = [current_user["id"]]
-            if kat_filter != "Tümü":
-                query += " AND deneme_kategorisi = ?"
-                params.append(kat_filter)
-            query += " GROUP BY deneme_adi ORDER BY id ASC"
-            df_tyt_genel = pd.read_sql_query(query, conn, params=params)
+    def _deneme_grafigi(df_kaynak, sinav_turu, selectbox_key):
+        """Tek bir deneme serisini (genel veya branş) kronolojik çizer."""
+        secenekler = grafik_seri_secenekleri(df_kaynak, sinav_turu)
+        if not secenekler:
+            st.info(f"Henüz {sinav_turu} denemesi kaydı bulunmuyor.")
+            return
+        etiket = st.selectbox(
+            "İncelenecek Seri:",
+            [s["etiket"] for s in secenekler],
+            key=selectbox_key,
+        )
+        secenek = next(
+            (s for s in secenekler if s["etiket"] == etiket), secenekler[0]
+        )
+        seri = seri_filtrele(
+            df_kaynak, secenek["kategori"], secenek["brans_dersi"]
+        )
+        if seri is None or seri.empty:
+            st.info("Bu seride gösterilecek deneme bulunamadı.")
+            return
+        grafik_df = seri[["tarih", "net_bilgisi"]].rename(
+            columns={"net_bilgisi": secenek["etiket"]}
+        )
+        st.line_chart(grafik_df.set_index("tarih"))
+        st.caption(
+            f"{len(seri)} deneme • X ekseni deneme tarihi • aynı adlı"
+            " denemeler ayrı nokta olarak gösterilir."
+        )
+        with st.expander("📋 Grafik Noktaları (Tarih • Deneme Adı • Net)"):
+            tablo = seri[["id", "tarih", "deneme_adi", "net_bilgisi"]].copy()
+            tablo.columns = ["Deneme ID", "Tarih", "Deneme Adı", "Net"]
+            st.dataframe(tablo, width="stretch", hide_index=True)
 
-        if not df_tyt_genel.empty:
-            st.line_chart(df_tyt_genel.set_index("deneme_adi")["net_bilgisi"])
-        else:
-            st.info("Seçili kritere uygun TYT denemesi bulunamadı.")
+    with grafik_tab1:
+        _deneme_grafigi(df_denemeler, "TYT", "kt_tyt_seri")
 
     with grafik_tab2:
-        target_tur = "YDT" if current_user["hedef_alan"] == "Dil" else "AYT"
-        with get_connection() as conn:
-            query = "SELECT deneme_adi, MAX(net_bilgisi) as net_bilgisi FROM deneme_konu_yanlislari WHERE ogrenci_id = ? AND deneme_turu = ?"
-            params = [current_user["id"], target_tur]
-            if kat_filter != "Tümü":
-                query += " AND deneme_kategorisi = ?"
-                params.append(kat_filter)
-            query += " GROUP BY deneme_adi ORDER BY id ASC"
-            df_ayt_genel = pd.read_sql_query(query, conn, params=params)
-
-        if not df_ayt_genel.empty:
-            st.line_chart(df_ayt_genel.set_index("deneme_adi")["net_bilgisi"])
-        else:
-            st.info(f"Seçili kritere uygun {target_tur} denemesi bulunamadı.")
+        _deneme_grafigi(df_denemeler, hedef_ayt_turu, "kt_ayt_seri")
 
     with grafik_tab3:
         with get_connection() as conn:
