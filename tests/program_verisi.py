@@ -1,15 +1,14 @@
-"""FAZ 5D test altyapısı: main.py'deki GERÇEK müfredat verisini yükler.
+"""FAZ 5D test altyapısı: uygulamanın GERÇEK müfredat verisini yükler.
 
-main.py bir Streamlit uygulamasıdır; import edilmesi arayüzü çalıştırır.
-Bu modül yalnızca modül düzeyindeki SAF VERİ atamalarını (`SORU_AGIRLIKLARI`,
-`KONU_SURELERI_DK`, `mufredat_klasik`, `_ALT_*`, `ON_KOSULLAR` ...) AST
-üzerinden değerlendirir. Böylece planlama motoru, kopyalanmış bir test
-müfredatıyla değil uygulamanın gerçek verisiyle test edilir.
+Veriler artık `main.py` içinde değil, saf veri paketi `data/` altındadır
+(bkz. FAZ A refactoring). Bu modül testlere eski API'yi (`sabitler`,
+`mufredat`, `mikro_alt_konular`, `baglam`) aynen sunar; böylece planlama
+motoru testleri kopyalanmış bir müfredatla değil, ürünün gerçek verisiyle
+çalışmaya devam eder.
 
-`MIKRO_ALT_KONULAR` main.py'de `update(_alt_ayristir(...))` çağrılarıyla
-kurulduğu için burada aynı dönüşümle yeniden üretilir.
+`data/` modülleri yan etkisizdir: import edilmeleri Streamlit'i veya
+veritabanını çalıştırmaz.
 """
-import ast
 import os
 import sys
 from datetime import date
@@ -18,41 +17,39 @@ KOK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if KOK not in sys.path:
     sys.path.insert(0, KOK)
 
-MAIN_PY = os.path.join(KOK, "main.py")
+from data.curriculum import mufredat_klasik as _MUFREDAT_KLASIK  # noqa: E402
+from data.curriculum import mufredat_maarif_9 as _MUFREDAT_MAARIF  # noqa: E402
+from data.prerequisites import ON_KOSULLAR  # noqa: E402
+from data.subtopics import (  # noqa: E402
+    _ALT_AYT_SAYISAL,
+    _ALT_TYT,
+    MIKRO_ALT_KONULAR,
+)
+from data.weights_and_times import (  # noqa: E402
+    KONU_SURELERI_DK,
+    SORU_AGIRLIKLARI,
+)
 
 POLINOM_ANA_KONU = "Polinomlar ve Çarpanlara Ayırma"
 POLINOM_MAKRO = "İleri Cebir ve Fonksiyonlar"
 REFERANS_TARIH = date(2026, 11, 9)  # Pazartesi
 
-_uzay = None
-
 
 def sabitler():
-    """main.py'deki saf veri atamalarını döndürür (önbellekli)."""
-    global _uzay
-    if _uzay is not None:
-        return _uzay
-    with open(MAIN_PY, "r", encoding="utf-8") as dosya:
-        agac = ast.parse(dosya.read(), MAIN_PY)
-    uzay = {}
-    for dugum in agac.body:
-        if not isinstance(dugum, ast.Assign) or len(dugum.targets) != 1:
-            continue
-        hedef = dugum.targets[0]
-        if not isinstance(hedef, ast.Name):
-            continue
-        try:
-            ifade = ast.Expression(dugum.value)
-            ast.fix_missing_locations(ifade)
-            uzay[hedef.id] = eval(compile(ifade, MAIN_PY, "eval"), dict(uzay))
-        except Exception:  # noqa: BLE001 - arayüz çağrıları atlanır
-            continue
-    _uzay = uzay
-    return uzay
+    """Testlerin kullandığı gerçek veri sabitleri."""
+    return {
+        "SORU_AGIRLIKLARI": SORU_AGIRLIKLARI,
+        "KONU_SURELERI_DK": KONU_SURELERI_DK,
+        "mufredat_klasik": _MUFREDAT_KLASIK,
+        "mufredat_maarif_9": _MUFREDAT_MAARIF,
+        "ON_KOSULLAR": ON_KOSULLAR,
+        "_ALT_TYT": _ALT_TYT,
+        "_ALT_AYT_SAYISAL": _ALT_AYT_SAYISAL,
+    }
 
 
 def _alt_ayristir(ham_sozluk):
-    """main.py'deki `_alt_ayristir` ile aynı kural: 'A|B' -> ['A', 'B']."""
+    """`data.subtopics._alt_ayristir` ile aynı kural: 'A|B' -> ['A', 'B']."""
     sonuc = {}
     for anahtar, metin in (ham_sozluk or {}).items():
         sonuc[anahtar] = [p.strip() for p in str(metin).split("|") if p.strip()]
@@ -60,12 +57,8 @@ def _alt_ayristir(ham_sozluk):
 
 
 def mikro_alt_konular():
-    """Uygulamanın gerçek MIKRO_ALT_KONULAR haritası."""
-    uzay = sabitler()
-    sonuc = {}
-    for ad in ("_ALT_TYT", "_ALT_AYT_SAYISAL"):
-        sonuc.update(_alt_ayristir(uzay.get(ad)))
-    return sonuc
+    """Uygulamanın gerçek MIKRO_ALT_KONULAR haritası (kopya)."""
+    return {anahtar: list(altlar) for anahtar, altlar in MIKRO_ALT_KONULAR.items()}
 
 
 def mufredat(mode="polinom"):
@@ -75,14 +68,13 @@ def mufredat(mode="polinom"):
     - `tam`: TYT + AYT Sayısal (tüm dersler)
     - `maarif9`: 9. sınıf Maarif müfredatı (alt başlık listesi olmayan konular)
     """
-    uzay = sabitler()
     if mode == "maarif9":
         return {
             ders: gruplar
-            for ders, gruplar in uzay["mufredat_maarif_9"].items()
+            for ders, gruplar in _MUFREDAT_MAARIF.items()
             if isinstance(gruplar, dict)
         }
-    klasik = uzay["mufredat_klasik"]
+    klasik = _MUFREDAT_KLASIK
     if mode == "polinom":
         return {"AYT Matematik": klasik["AYT"]["Sayısal"]["AYT Matematik"]}
     sonuc = {}
@@ -107,7 +99,6 @@ def baglam(
     ogrenci_id=1,
 ):
     """`planner.plan_uret` için gerçek verilerle bağlam kurar."""
-    uzay = sabitler()
     return {
         "ogrenci_id": ogrenci_id,
         "baslangic": baslangic or REFERANS_TARIH,
@@ -115,9 +106,9 @@ def baglam(
         "musaitlik": musaitlik
         or {1: 240, 2: 240, 3: 240, 4: 240, 5: 240, 6: 300, 7: 300},
         "mufredat": mufredat(mode),
-        "konu_sureleri": konu_sureleri or uzay["KONU_SURELERI_DK"],
-        "soru_agirliklari": uzay["SORU_AGIRLIKLARI"],
-        "on_kosullar": {**uzay.get("ON_KOSULLAR_EK", {}), **uzay["ON_KOSULLAR"]},
+        "konu_sureleri": konu_sureleri or KONU_SURELERI_DK,
+        "soru_agirliklari": SORU_AGIRLIKLARI,
+        "on_kosullar": ON_KOSULLAR,
         "mikro_alt": mikro_alt_konular(),
         # Polinomlar'ın ön koşulu olan TYT konuları biliniyor varsayılır.
         "bilinen_mikro": set(bilinen_mikro if bilinen_mikro is not None
