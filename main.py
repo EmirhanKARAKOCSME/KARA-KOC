@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from services import study_sessions
+from services import programs as program_service
 
 # ==============================================================================
 # SİSTEM VE ZAMAN DİLİMİ AYARLARI (UTC+3 TÜRKİYE SAATİ)
@@ -1431,6 +1432,9 @@ init_db()
 
 # FAZ 4: gerçek çalışma oturumları tablosu/indeksleri (idempotent, veri silmez).
 study_sessions.init_db()
+
+# FAZ 5A: program sürümleme şeması (idempotent; eski görevler korunur).
+program_service.init_db()
 
 def sanitize_key(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]", "_", str(text))
@@ -3482,12 +3486,45 @@ def _on_kosul_coz(mikro, sim_bilinen, kurallar, konu_index, derinlik=0):
     return mikro
 
 
-def akilli_program_motoru_uygula(
-    cursor, ogrenci_id, aktif_mufredat, alarmlar,
+# ==============================================================================
+# PROGRAM MOTORLARI (FAZ 5A)
+# Motorlar artık VERİTABANINA YAZMAZ: yalnızca görev listesi üretir. Programın
+# tek transaction'da yazılmasını `program_service.program_olustur` üstlenir.
+# Böylece bir motor hata verse bile eski program, eski görevler ve gerçek
+# çalışma oturumları korunur (hiçbir yerde DELETE yoktur).
+# ==============================================================================
+GOREV_SUTUNLARI = (
+    "gun",
+    "ders",
+    "makro_konu",
+    "mikro_konu",
+    "gorev_tanimi",
+    "hedef_soru",
+    "pedagoji_turu",
+    "tarih",
+    "alt_konu",
+)
+
+
+def _satirlardan_gorevler(rows):
+    """(gun, ders, ...) demetlerini görev sözlüklerine çevirir."""
+    gorevler = []
+    for satir in rows:
+        gorev = {alan: None for alan in GOREV_SUTUNLARI}
+        for alan, deger in zip(GOREV_SUTUNLARI, satir):
+            gorev[alan] = deger
+        gorevler.append(gorev)
+    return gorevler
+
+
+def akilli_program_motoru_gorevleri(
+    ogrenci_id, aktif_mufredat, alarmlar,
     ana_blok_sayisi, blok_soru_butcesi, paragraf_hedef,
 ):
-    """Sıralı + soru kotalı + hıza duyarlı 7 günlük program üretir.
-    Veritabanına EN SON yazar; hata olursa hiçbir şey yazılmaz (eski motor devreye girer)."""
+    """Sıralı + soru kotalı + hıza duyarlı 7 günlük görev listesi üretir.
+
+    FAZ 5A: yalnızca bellek içinde çalışır; veritabanına yazmaz.
+    """
     durum = program_durumu_yukle(ogrenci_id)
     sim_bilinen = set(durum["bilinen_mikro"])
     sim_cozulen = dict(durum["cozulen"])
@@ -3642,19 +3679,8 @@ def akilli_program_motoru_uygula(
                 rows.append((gun_adi, d, m, mi, tanim, soru, ped, tarih_str))
                 sim_cozulen[(d, mi)] = sim_cozulen.get((d, mi), 0) + soru
 
-    cursor.executemany(
-        """INSERT INTO calisma_programi_gorevler
-           (ogrenci_id, gun, ders, makro_konu, mikro_konu, gorev_tanimi, hedef_soru, pedagoji_turu, durum, tarih)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
-        [(ogrenci_id,) + r for r in rows],
-    )
-    plan_soru = sum(r[5] for r in rows if r[6] != "Tekrar")
-    cursor.execute(
-        "INSERT INTO ogrenci_hiz_gecmisi (ogrenci_id, tarih, planlanan_gorev,"
-        " planlanan_soru, kullanilan_katsayi) VALUES (?, ?, ?, ?, ?)",
-        (ogrenci_id, bugun_dt.strftime("%Y-%m-%d"), len(rows), plan_soru, k),
-    )
-    return True
+    # FAZ 5A: yazma yok - görev listesi döndürülür (eski program korunur).
+    return _satirlardan_gorevler(rows)
 # ==============================================================================
 # 🔬 ALT BAŞLIKLAR
 # ==============================================================================
@@ -4112,12 +4138,12 @@ def gorev_chk_durum_senkron(anahtar, veritaban_degeri):
         st.session_state[isaret] = yeni
 
 
-def akilli_program_motoru_v2_uygula(
-    cursor, ogrenci_id, aktif_mufredat, alarmlar,
+def akilli_program_motoru_v2_gorevleri(
+    ogrenci_id, aktif_mufredat, alarmlar,
     ana_blok_sayisi, blok_soru_butcesi, paragraf_hedef,
 ):
-    """Alt başlık düzeyinde çalışan sıralı + soru kotalı + hıza duyarlı 7 günlük program.
-    Veritabanına EN SON yazar; hata olursa hiçbir şey yazılmaz."""
+    """Alt başlık düzeyinde çalışan sıralı + soru kotalı + hıza duyarlı 7 günlük
+    görev listesi üretir. FAZ 5A: yalnızca bellekte çalışır; yazma/silme yok."""
     durum = program_durumu_yukle(ogrenci_id)
     sim_bilinen = set(durum["bilinen_mikro"])
     sim_cozulen = dict(durum["cozulen"])
@@ -4318,20 +4344,186 @@ def akilli_program_motoru_v2_uygula(
                 rows.append((gun_adi, d, m, mi, tanim, soru, ped, tarih_str, ""))
                 sim_cozulen[(d, mi)] = sim_cozulen.get((d, mi), 0) + soru
 
-    cursor.executemany(
-        """INSERT INTO calisma_programi_gorevler
-           (ogrenci_id, gun, ders, makro_konu, mikro_konu, gorev_tanimi, hedef_soru,
-            pedagoji_turu, durum, tarih, alt_konu)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
-        [(ogrenci_id,) + r for r in rows],
+    # FAZ 5A: yazma yok - görev listesi döndürülür (eski program korunur).
+    return _satirlardan_gorevler(rows)
+
+
+def eski_program_motoru_gorevleri(
+    gunler,
+    paragraf_hedef,
+    blok_soru_butcesi,
+    ana_gorev_blok_sayisi,
+    filtered_pekistirme,
+    filtered_ezber,
+):
+    """Son çare (temel) motor. FAZ 5A: yalnızca görev listesi üretir.
+
+    Eski sürümde bu motor doğrudan tabloya yazıyor ve önce mevcut görevleri
+    siliyordu. Artık ne yazar ne siler; plan yalnızca bellekte kurulur.
+    """
+    gorevler = []
+    yari_blok = max(1, int(ana_gorev_blok_sayisi or 2) // 2)
+    pekistirme_havuzu = list(filtered_pekistirme or [])
+    ezber_havuzu = list(filtered_ezber or [])
+    bugun_dt = get_tr_now()
+    slot_soru = max(5, int(blok_soru_butcesi or 10))
+
+    for idx, g in enumerate(gunler):
+        tarih_dt = bugun_dt + timedelta(days=idx)
+        tarih_str = tarih_dt.strftime("%Y-%m-%d")
+
+        gorevler.append({
+            "gun": g,
+            "ders": "TYT Türkçe",
+            "makro_konu": "Paragraf",
+            "mikro_konu": "Günlük Paragraf",
+            "gorev_tanimi": (
+                f"📖 PARAGRAF: {paragraf_hedef} Paragraf Sorusu Çöz (~30 dk)"
+            ),
+            "hedef_soru": paragraf_hedef,
+            "pedagoji_turu": "Ezber",
+            "tarih": tarih_str,
+            "alt_konu": None,
+        })
+
+        for _ in range(yari_blok):
+            curr_item = (
+                pekistirme_havuzu.pop(0)
+                if pekistirme_havuzu
+                else {
+                    "ders": "TYT Matematik",
+                    "makro": "Karma Soru",
+                    "mikro": "Soru Çözümü & Prova",
+                    "neden": "Genel Tekrar",
+                }
+            )
+            konu_anlatim_dk = KONU_SURELERI_DK.get(curr_item["mikro"], 60)
+            soru_cozum_dk = int(slot_soru * 1.5)
+            toplam_gorev_suresi = konu_anlatim_dk + soru_cozum_dk
+            gorevler.append({
+                "gun": g,
+                "ders": curr_item["ders"],
+                "makro_konu": curr_item["makro"],
+                "mikro_konu": curr_item["mikro"],
+                "gorev_tanimi": (
+                    f"📌 UYGULAMA & SORU: Konu/Tekrar ({konu_anlatim_dk} dk) + "
+                    f"{slot_soru} Soru ({soru_cozum_dk} dk) "
+                    f"[Toplam ~{toplam_gorev_suresi} dk | Odak: {curr_item['neden']}]"
+                ),
+                "hedef_soru": slot_soru,
+                "pedagoji_turu": "Pekiştirme",
+                "tarih": tarih_str,
+                "alt_konu": None,
+            })
+
+        for _ in range(yari_blok):
+            curr_item = (
+                ezber_havuzu.pop(0)
+                if ezber_havuzu
+                else {
+                    "ders": "TYT Biyoloji",
+                    "makro": "Kavram Tekrarı",
+                    "mikro": "Özet Not Çalışması",
+                    "neden": "Genel Tekrar",
+                }
+            )
+            konu_anlatim_dk = KONU_SURELERI_DK.get(curr_item["mikro"], 50)
+            soru_cozum_dk = int(slot_soru * 1.5)
+            toplam_gorev_suresi = konu_anlatim_dk + soru_cozum_dk
+            gorevler.append({
+                "gun": g,
+                "ders": curr_item["ders"],
+                "makro_konu": curr_item["makro"],
+                "mikro_konu": curr_item["mikro"],
+                "gorev_tanimi": (
+                    f"📝 KAVRAM & ÖZET: Konu Çalış ({konu_anlatim_dk} dk) + "
+                    f"{slot_soru} Soru ({soru_cozum_dk} dk) "
+                    f"[Toplam ~{toplam_gorev_suresi} dk | Odak: {curr_item['neden']}]"
+                ),
+                "hedef_soru": slot_soru,
+                "pedagoji_turu": "Ezber",
+                "tarih": tarih_str,
+                "alt_konu": None,
+            })
+
+            tekrar_dt = tarih_dt + timedelta(days=3)
+            gorevler.append({
+                "gun": GUN_ADLARI_LISTE[tekrar_dt.weekday()],
+                "ders": curr_item["ders"],
+                "makro_konu": curr_item["makro"],
+                "mikro_konu": curr_item["mikro"],
+                "gorev_tanimi": (
+                    f"🔄 3 GÜNLÜK ARALIKLI TEKRAR: '{curr_item['mikro']}' "
+                    "Notlarını 20 dk Gözden Geçir."
+                ),
+                "hedef_soru": 0,
+                "pedagoji_turu": "Tekrar",
+                "tarih": tekrar_dt.strftime("%Y-%m-%d"),
+                "alt_konu": None,
+            })
+    return gorevler
+
+
+def haftalik_program_gorevleri_uret(
+    ogrenci_id,
+    aktif_mufredat,
+    alarmlar,
+    ana_gorev_blok_sayisi,
+    blok_soru_butcesi,
+    paragraf_hedef,
+    gunler,
+    filtered_pekistirme,
+    filtered_ezber,
+):
+    """Motor zinciri: alt başlık → soru kotalı → temel.
+
+    Hiçbir aşamada veritabanına yazılmaz veya silinmez; yalnızca görev listesi
+    döner. Yazmayı `program_service.program_olustur` tek transaction'da yapar;
+    hata olursa hiçbir şey değişmez (eski program aktif kalır).
+    """
+    uyarilar = []
+    try:
+        gorevler = akilli_program_motoru_v2_gorevleri(
+            ogrenci_id,
+            aktif_mufredat,
+            alarmlar,
+            ana_gorev_blok_sayisi,
+            blok_soru_butcesi,
+            paragraf_hedef,
+        )
+        if gorevler:
+            return gorevler, "Alt başlık motoru", uyarilar
+        uyarilar.append("Alt başlık motoru boş plan üretti.")
+    except Exception as hata:  # noqa: BLE001 - motor çökse de program korunur
+        uyarilar.append("Alt başlık motoru çalışmadı: %s" % hata)
+
+    try:
+        gorevler = akilli_program_motoru_gorevleri(
+            ogrenci_id,
+            aktif_mufredat,
+            alarmlar,
+            ana_gorev_blok_sayisi,
+            blok_soru_butcesi,
+            paragraf_hedef,
+        )
+        if gorevler:
+            return gorevler, "Soru kotalı motor", uyarilar
+        uyarilar.append("Soru kotalı motor boş plan üretti.")
+    except Exception as hata:  # noqa: BLE001
+        uyarilar.append("Soru kotalı motor çalışmadı: %s" % hata)
+
+    gorevler = eski_program_motoru_gorevleri(
+        gunler,
+        paragraf_hedef,
+        blok_soru_butcesi,
+        ana_gorev_blok_sayisi,
+        filtered_pekistirme,
+        filtered_ezber,
     )
-    plan_soru = sum(r[5] for r in rows if r[6] != "Tekrar")
-    cursor.execute(
-        "INSERT INTO ogrenci_hiz_gecmisi (ogrenci_id, tarih, planlanan_gorev,"
-        " planlanan_soru, kullanilan_katsayi) VALUES (?, ?, ?, ?, ?)",
-        (ogrenci_id, bugun_dt.strftime("%Y-%m-%d"), len(rows), plan_soru, k),
-    )
-    return True
+    uyarilar.append("Temel program motoru kullanıldı.")
+    return gorevler, "Temel motor", uyarilar
+
+
 if "active_user" not in st.session_state:
     st.session_state.active_user = None
 
@@ -5656,6 +5848,45 @@ def _oturum_paneli_veya_form(oturum, planlanan_soru=0):
 
 
 # ==============================================================================
+# FAZ 5A: ÖNCEKİ PROGRAMLARIM (geçmiş sürümler - salt okunur)
+# ==============================================================================
+def _onceki_programlar_bolumu(ogrenci_id):
+    """Geçmiş program sürümlerinin sade özeti. Hiçbir kayıt silinmez/değişmez."""
+    try:
+        gecmis = program_service.gecmis_ozeti(ogrenci_id, limit=8)
+    except Exception as hata:  # noqa: BLE001 - arayüz çökmemeli
+        st.caption("Program geçmişi okunamadı: %s" % hata)
+        return
+    kayitlar = list(gecmis.get("programlar") or [])
+    eski = gecmis.get("eski_kayitlar")
+    if eski:
+        kayitlar.append(eski)
+    if not kayitlar:
+        return
+    with st.expander("📚 Önceki Programlarım", expanded=False):
+        st.caption(
+            "Program yenilemek geçmişinizi silmez: tamamlanan görevler, yarım"
+            " kalanlar ve gerçek çalışma süreleri burada saklı kalır."
+        )
+        for kayit in kayitlar:
+            bas = kayit.get("baslangic_tarihi") or "-"
+            bit = kayit.get("bitis_tarihi") or "-"
+            oran = int(kayit.get("oran") or 0)
+            st.markdown(
+                f"**{bas} ➔ {bit}** · {kayit.get('durum') or '-'}  \n"
+                f"✅ Tamamlanan: {kayit.get('tamamlanan', 0)} · "
+                f"⏳ Yarım kalan: {kayit.get('yarim', 0)} · "
+                f"%{oran} tamamlandı · "
+                f"⏱️ {kayit.get('gercek_sure_dk', 0)} dk gerçek çalışma"
+            )
+            st.progress(max(0.0, min(1.0, oran / 100.0)))
+        st.caption(
+            "Geçmiş kayıtlar salt okunurdur; bu bölümden hiçbir görev"
+            " değiştirilmez veya silinmez."
+        )
+
+
+# ==============================================================================
 # TAB 1: BUGÜNÜN GÖREVLERİ (ODAK EKRANI)
 # ==============================================================================
 with tab1:
@@ -5677,14 +5908,28 @@ with tab1:
     }
     bugun_gun_adi = gun_adlari_tr.get(bugun_dt.strftime("%A"), "Pazartesi")
 
-    with get_connection() as conn:
-        df_bugun = pd.read_sql_query(
-            "SELECT id, ders, makro_konu, mikro_konu, alt_konu, gorev_tanimi, hedef_soru, "
-            "pedagoji_turu, durum "
-            "FROM calisma_programi_gorevler WHERE ogrenci_id = ? AND (tarih = ? OR gun = ?)",
-            conn,
-            params=(current_user["id"], bugun_str, bugun_gun_adi),
-        )
+    # FAZ 5A: günün görevleri TAM TARİH + aktif program + öğrenci üzerinden
+    # filtrelenir. Eski `(tarih = ? OR gun = ?)` birleşimi kaldırıldı; böylece
+    # geçen haftaların aynı gün adına ait görevleri bugüne sızmaz. Program
+    # bağlantısı olmayan eski kayıtlar yalnızca aktif program yokken gösterilir.
+    BUGUN_GOREV_SUTUNLARI = [
+        "id",
+        "ders",
+        "makro_konu",
+        "mikro_konu",
+        "alt_konu",
+        "gorev_tanimi",
+        "hedef_soru",
+        "tahmini_sure_dk",
+        "pedagoji_turu",
+        "durum",
+        "program_id",
+        "kaynak_gorev_id",
+    ]
+    df_bugun = pd.DataFrame(
+        program_service.gun_gorevleri(current_user["id"], bugun_str),
+        columns=BUGUN_GOREV_SUTUNLARI,
+    )
 
     # FAZ 4: aktif çalışma oturumu veritabanından okunur; sayfa yenilense,
     # başka sekmeye geçilse veya uygulama kapansa da kaybolmaz.
@@ -6867,12 +7112,8 @@ with tab5:
         if st.button("🚀 Akıllı Haftalık Programımı Oluştur", type="primary"):
             hiz_gecmisi_kaydet(current_user["id"])
             with get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "DELETE FROM calisma_programi_gorevler WHERE ogrenci_id ="
-                    " ?",
-                    (current_user["id"],),
-                )
+                # FAZ 5A: eski program/görevler SİLİNMEZ. Yeni program ayrı bir
+                # sürüm olarak eklenir; eskisi arşivlenir (tek transaction).
                 gunler = [
                     "Pazartesi",
                     "Salı",
@@ -6967,182 +7208,77 @@ with tab5:
                 filtered_pekistirme.sort(key=lambda x: x["p_score"], reverse=True)
                 filtered_ezber.sort(key=lambda x: x["p_score"], reverse=True)
 
-                yari_blok = max(1, ana_gorev_blok_sayisi // 2)
-                
-                yeni_motor_calisti = False
-                try:
-                    yeni_motor_calisti = akilli_program_motoru_v2_uygula(
-                        cursor,
-                        current_user["id"],
-                        aktif_mufredat_hiyerarsisi,
-                        alarmlar_db,
-                        ana_gorev_blok_sayisi,
-                        blok_basi_soru_bütcesi,
-                        günlük_paragraf_hedef,
-                    )
-                except Exception as motor_hata_v2:
-                    yeni_motor_calisti = False
-                    cursor.execute(
-                        "DELETE FROM calisma_programi_gorevler WHERE ogrenci_id = ?",
-                        (current_user["id"],),
-                    )
-                    try:
-                        yeni_motor_calisti = akilli_program_motoru_uygula(
-                            cursor,
-                            current_user["id"],
-                            aktif_mufredat_hiyerarsisi,
-                            alarmlar_db,
-                            ana_gorev_blok_sayisi,
-                            blok_basi_soru_bütcesi,
-                            günlük_paragraf_hedef,
-                        )
-                        set_flash_message(
-                            "warning",
-                            f"Alt başlık motoru çalışmadı, önceki motor kullanıldı: {motor_hata_v2}",
-                        )
-                    except Exception as motor_hata:
-                        yeni_motor_calisti = False
-                        cursor.execute(
-                            "DELETE FROM calisma_programi_gorevler WHERE ogrenci_id = ?",
-                            (current_user["id"],),
-                        )
-                        set_flash_message(
-                            "warning",
-                            f"Yeni program motorları çalışmadı, eski motor kullanıldı: {motor_hata}",
-                        )
-                    for idx, g in enumerate(gunler):
-                        tarih_dt = get_tr_now() + timedelta(days=idx)
-                        tarih_str = tarih_dt.strftime("%Y-%m-%d")
+                gorevler, motor_adi, uyarilar = haftalik_program_gorevleri_uret(
+                    current_user["id"],
+                    aktif_mufredat_hiyerarsisi,
+                    alarmlar_db,
+                    ana_gorev_blok_sayisi,
+                    blok_basi_soru_bütcesi,
+                    günlük_paragraf_hedef,
+                    gunler,
+                    filtered_pekistirme,
+                    filtered_ezber,
+                )
 
-                        # Paragraf Rutini
-                        cursor.execute(
-                            """INSERT INTO calisma_programi_gorevler 
-                               (ogrenci_id, gun, ders, makro_konu, mikro_konu, gorev_tanimi, hedef_soru, pedagoji_turu, durum, tarih) 
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+            # FAZ 5A: program TEK transaction'da yazılır ve hiçbir görev silinmez.
+            # Motor hata verse bile eski program/görevler/oturumlar korunur.
+            baslangic_tarih = get_tr_now().strftime("%Y-%m-%d")
+            bitis_tarih = (get_tr_now() + timedelta(days=6)).strftime("%Y-%m-%d")
+            try:
+                yeni_program = program_service.program_olustur(
+                    current_user["id"],
+                    baslangic_tarih,
+                    bitis_tarih,
+                    gorevler,
+                    gunluk_hedef_dakika=toplam_gunluk_dakika,
+                    program_notu=motor_adi,
+                )
+            except program_service.ProgramHatasi as program_hata:
+                set_flash_message(
+                    "error",
+                    "Program oluşturulamadı: %s Mevcut programınız, eski"
+                    " görevleriniz ve çalışma kayıtlarınız korunuyor."
+                    % program_hata,
+                )
+                st.rerun()
+            else:
+                plan_soru = sum(
+                    int(g.get("hedef_soru") or 0)
+                    for g in gorevler
+                    if g.get("pedagoji_turu") != "Tekrar"
+                )
+                try:
+                    with get_connection() as kayit_conn:
+                        kayit_conn.execute(
+                            "INSERT INTO ogrenci_hiz_gecmisi (ogrenci_id, tarih,"
+                            " planlanan_gorev, planlanan_soru, kullanilan_katsayi)"
+                            " VALUES (?, ?, ?, ?, ?)",
                             (
                                 current_user["id"],
-                                g,
-                                "TYT Türkçe",
-                                "Paragraf",
-                                "Günlük Paragraf",
-                                f"📖 PARAGRAF: {günlük_paragraf_hedef} Paragraf Sorusu Çöz (~30 dk)",
-                                günlük_paragraf_hedef,
-                                "Ezber",
-                                tarih_str,
+                                baslangic_tarih,
+                                len(gorevler),
+                                plan_soru,
+                                hesapla_hiz_katsayisi(current_user["id"]),
                             ),
                         )
-
-                        # Uygulama & Soru Çözüm Blokları (MİKRO SÜRE FORMÜLÜ)
-                        for _ in range(yari_blok):
-                            curr_item = (
-                                filtered_pekistirme.pop(0)
-                                if filtered_pekistirme
-                                else {
-                                    "ders": "TYT Matematik",
-                                    "makro": "Karma Soru",
-                                    "mikro": "Soru Çözümü & Prova",
-                                    "neden": "Genel Tekrar",
-                                }
-                            )
-                            slot_soru = blok_basi_soru_bütcesi
-                            konu_anlatim_dk = KONU_SURELERI_DK.get(curr_item["mikro"], 60)
-                            soru_cozum_dk = int(slot_soru * 1.5)
-                            toplam_gorev_suresi = konu_anlatim_dk + soru_cozum_dk
-
-                            tanim = (
-                                f"📌 UYGULAMA & SORU: Konu/Tekrar ({konu_anlatim_dk} dk) + {slot_soru} Soru ({soru_cozum_dk} dk) "
-                                f"[Toplam ~{toplam_gorev_suresi} dk | Odak: {curr_item['neden']}]"
-                            )
-
-                            cursor.execute(
-                                """INSERT INTO calisma_programi_gorevler 
-                                   (ogrenci_id, gun, ders, makro_konu, mikro_konu, gorev_tanimi, hedef_soru, pedagoji_turu, durum, tarih) 
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
-                                (
-                                    current_user["id"],
-                                    g,
-                                    curr_item["ders"],
-                                    curr_item["makro"],
-                                    curr_item["mikro"],
-                                    tanim,
-                                    slot_soru,
-                                    "Pekiştirme",
-                                    tarih_str,
-                                ),
-                            )
-
-                        # Kavram & Özet Blokları (3 GÜN SONRAKİ ARALIKLI TEKRAR EKLEME)
-                        for _ in range(yari_blok):
-                            curr_item = (
-                                filtered_ezber.pop(0)
-                                if filtered_ezber
-                                else {
-                                    "ders": "TYT Biyoloji",
-                                    "makro": "Kavram Tekrarı",
-                                    "mikro": "Özet Not Çalışması",
-                                    "neden": "Genel Tekrar",
-                                }
-                            )
-                            slot_soru = blok_basi_soru_bütcesi
-                            konu_anlatim_dk = KONU_SURELERI_DK.get(curr_item["mikro"], 50)
-                            soru_cozum_dk = int(slot_soru * 1.5)
-                            toplam_gorev_suresi = konu_anlatim_dk + soru_cozum_dk
-
-                            tanim = (
-                                f"📝 KAVRAM & ÖZET: Konu Çalış ({konu_anlatim_dk} dk) + {slot_soru} Soru ({soru_cozum_dk} dk) "
-                                f"[Toplam ~{toplam_gorev_suresi} dk | Odak: {curr_item['neden']}]"
-                            )
-
-                            cursor.execute(
-                                """INSERT INTO calisma_programi_gorevler 
-                                   (ogrenci_id, gun, ders, makro_konu, mikro_konu, gorev_tanimi, hedef_soru, pedagoji_turu, durum, tarih) 
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
-                                (
-                                    current_user["id"],
-                                    g,
-                                    curr_item["ders"],
-                                    curr_item["makro"],
-                                    curr_item["mikro"],
-                                    tanim,
-                                    slot_soru,
-                                    "Ezber",
-                                    tarih_str,
-                                ),
-                            )
-
-                            # 3 Günlük Aralıklı Tekrar (Spaced Repetition & datetime +3 Gün)
-                            geceler_3_gun = (tarih_dt + timedelta(days=3)).strftime("%Y-%m-%d")
-                            geceler_gun_ad = gunler[(idx + 3) % 7]
-                            tekrar_tanim = (
-                                f"🔄 3 GÜNLÜK ARALIKLI TEKRAR: '{curr_item['mikro']}' Notlarını 20 dk Gözden Geçir."
-                            )
-                            cursor.execute(
-                                """INSERT INTO calisma_programi_gorevler 
-                                   (ogrenci_id, gun, ders, makro_konu, mikro_konu, gorev_tanimi, hedef_soru, pedagoji_turu, durum, tarih) 
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
-                                (
-                                    current_user["id"],
-                                    geceler_gun_ad,
-                                    curr_item["ders"],
-                                    curr_item["makro"],
-                                    curr_item["mikro"],
-                                    tekrar_tanim,
-                                    0,
-                                    "Tekrar",
-                                    geceler_3_gun,
-                                ),
-                            )
-
-                conn.commit()
-            log_islem(
-                current_user["id"],
-                "CREATE_PROGRAM",
-                "Haftalık Çalışma Programı Oluşturuldu (Spaced Repetition & Dependency Tree).",
-            )
-            set_flash_message(
-                "success", "🎉 Ön koşul kilitli ve aralıklı tekrarlı haftalık programınız oluşturuldu!"
-            )
-            st.rerun()
+                        kayit_conn.commit()
+                except Exception:
+                    pass
+                log_islem(
+                    current_user["id"],
+                    "CREATE_PROGRAM",
+                    "Haftalık program oluşturuldu (#%s, %s, %s görev)."
+                    % (yeni_program["id"], motor_adi, len(gorevler)),
+                )
+                uyari_metni = (" " + " ".join(uyarilar)) if uyarilar else ""
+                set_flash_message(
+                    "success",
+                    "🎉 Haftalık programınız oluşturuldu (#%s). Toplam %s görev"
+                    " planlandı.%s" % (yeni_program["id"], len(gorevler), uyari_metni),
+                )
+                if uyarilar:
+                    set_flash_message("warning", uyari_metni.strip())
+                st.rerun()
 
     with col_p2:
         st.subheader("🏆 Tahmini ÖSYM Sıralama Simülatörü")
@@ -7260,15 +7396,27 @@ with tab5:
             )
 
     st.markdown("---")
+    _onceki_programlar_bolumu(current_user["id"])
     st.subheader("📋 7 Günlük Genel Çalışma Çizelgesi")
-    with get_connection() as conn:
-        df_program_full = pd.read_sql_query(
-            "SELECT id, gun, ders, makro_konu, mikro_konu, gorev_tanimi,"
-            " hedef_soru, pedagoji_turu, durum FROM calisma_programi_gorevler"
-            " WHERE ogrenci_id = ?",
-            conn,
-            params=(current_user["id"],),
-        )
+    # FAZ 5A: çizelge yalnızca AKTİF programın görevlerini gösterir (aktif
+    # program yoksa program bağlantısı olmayan eski kayıtlar gösterilir).
+    df_program_full = pd.DataFrame(
+        program_service.gorunur_gorevler(current_user["id"]),
+        columns=[
+            "id",
+            "gun",
+            "ders",
+            "makro_konu",
+            "mikro_konu",
+            "gorev_tanimi",
+            "hedef_soru",
+            "tahmini_sure_dk",
+            "pedagoji_turu",
+            "durum",
+            "tarih",
+            "program_id",
+        ],
+    )
 
     if not df_program_full.empty:
         biten_gorev = len(df_program_full[df_program_full["durum"] == 1])
