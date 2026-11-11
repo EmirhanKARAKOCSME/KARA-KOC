@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# SQLite calisma dosyalari (WAL/SHM commit edilmez; ana .db takip edilir)
+*.db-wal
+*.db-shm
+
+# Yerel yedekler
+KARA_KOC_YEDEK/
