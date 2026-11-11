@@ -5034,6 +5034,132 @@ def hesapla_tum_alarmlar(ogrenci_id, mevcut_sinif, aktif_mufredat):
 
 
 # ==============================================================================
+# FAZ 8: PUAN-SIRA REFERANS VERİSİ YÖNETİMİ (yalnızca yönetici paneli)
+# ==============================================================================
+# Simülatörün sıralama tahmini bu referans dosyasından beslenir. Kaynaksız
+# kayıt kabul edilmez; doğrulama/ayrıştırma `services/osym_verisi.py` içindedir.
+def yks_referans_verisi_yonetimi(yonetici_id):
+    """Yönetici için referans verisi ekleme/silme arayüzü."""
+    try:
+        ozet = osym_verisi.veri_ozeti()
+    except osym_verisi.VeriHatasi as hata:
+        st.error("Referans verisi okunamadı: %s" % hata)
+        st.caption("Dosya: `%s`" % osym_verisi.veri_dosyasi())
+        return
+
+    st.subheader("🎯 YKS Puan–Sıra Referans Verisi")
+    st.caption(
+        "Simülatörün sıralama tahmini yalnızca buradaki doğrulanmış noktaları"
+        " kullanır. Dosya: `%s` · Kayıt: %d · Hatalı: %d · Güncelleme: %s"
+        % (
+            ozet.get("dosya"),
+            ozet.get("kayit_sayisi") or 0,
+            ozet.get("hatali_kayit_sayisi") or 0,
+            ozet.get("guncelleme") or "—",
+        )
+    )
+
+    kayitlar = ozet.get("kaynaklar") or []
+    if kayitlar:
+        st.dataframe(
+            pd.DataFrame(kayitlar), width="stretch", hide_index=True
+        )
+    else:
+        st.info(
+            "Henüz referans verisi yok. Resmî kaynağa dayanan puan–sıra"
+            " noktalarını aşağıdaki formdan ekleyebilirsiniz."
+        )
+
+    with st.form("yks_referans_ekle_formu"):
+        st.markdown("**Referans kaydı ekle / güncelle**")
+        kol1, kol2 = st.columns(2)
+        with kol1:
+            veri_yil = st.selectbox(
+                "Sınav yılı",
+                list(reversed(osym_verisi.desteklenen_yillar())),
+                key="yks_ref_yil",
+            )
+            veri_kurum = st.text_input(
+                "Kaynak kurum", value="", key="yks_ref_kurum"
+            )
+            veri_url = st.text_input(
+                "Kaynak bağlantısı (URL)", value="", key="yks_ref_url"
+            )
+        with kol2:
+            veri_tur = st.selectbox(
+                "Puan türü",
+                list(osym_verisi.PUAN_TURLERI),
+                key="yks_ref_tur",
+            )
+            veri_belge = st.text_input(
+                "Kaynak belge / tablo adı", value="", key="yks_ref_belge"
+            )
+            veri_erisim = st.text_input(
+                "Erişim tarihi (YYYY-AA-GG)",
+                value="",
+                placeholder="2026-11-11",
+                key="yks_ref_erisim",
+            )
+        veri_noktalar = st.text_area(
+            "Noktalar (her satır: puan;sıra)",
+            value="",
+            height=120,
+            placeholder="500;500\n450;6000\n400;30000",
+            key="yks_ref_noktalar",
+        )
+        veri_not = st.text_input(
+            "Not (kapsam / sınırlılık)", value="", key="yks_ref_not"
+        )
+        if st.form_submit_button("💾 Referans kaydını yaz"):
+            try:
+                osym_verisi.kayit_ekle(
+                    veri_yil,
+                    veri_tur,
+                    osym_verisi.metinden_noktalar(veri_noktalar),
+                    {
+                        "kurum": veri_kurum,
+                        "belge": veri_belge,
+                        "url": veri_url,
+                        "erisim_tarihi": veri_erisim or None,
+                    },
+                    not_metni=veri_not,
+                )
+            except (ValueError, osym_verisi.VeriHatasi) as hata:
+                st.error("Kayıt yazılamadı: %s" % hata)
+            else:
+                log_islem(
+                    yonetici_id,
+                    "SAVE_RANK_DATA",
+                    "%s / %s" % (veri_yil, veri_tur),
+                )
+                set_flash_message(
+                    "success",
+                    "Referans kaydı yazıldı (%s / %s)."
+                    % (veri_yil, veri_tur),
+                )
+                st.rerun()
+
+    if kayitlar:
+        with st.form("yks_referans_sil_formu"):
+            st.markdown("**Referans kaydı sil**")
+            sil_secenekleri = [
+                "%s / %s" % (kayit["yil"], kayit["puan_turu"])
+                for kayit in kayitlar
+            ]
+            sil_secim = st.selectbox(
+                "Silinecek kayıt", sil_secenekleri, key="yks_ref_sil"
+            )
+            if st.form_submit_button("🗑️ Seçili kaydı sil"):
+                sil_yil, sil_tur = sil_secim.split(" / ")
+                osym_verisi.kayit_sil(sil_yil, sil_tur)
+                log_islem(yonetici_id, "DELETE_RANK_DATA", sil_secim)
+                set_flash_message(
+                    "info", "Referans kaydı silindi: %s" % sil_secim
+                )
+                st.rerun()
+
+
+# ==============================================================================
 # 👑 ADMİN / YÖNETİCİ PANELİ
 # ==============================================================================
 if current_user["rol"] == "admin":
@@ -5043,15 +5169,17 @@ if current_user["rol"] == "admin":
         " yönetebilir, düzenleyebilir ve ders taleplerini inceleyebilirsiniz."
     )
 
-    admin_tab1, admin_tab2, admin_tab3 = st.tabs(
+    admin_tab1, admin_tab2, admin_tab3, admin_tab4 = st.tabs(
         [
             "➕ 1. Yeni Öğrenci Ekle",
             "👥 2. Öğrenci Düzenleme & Yönetim",
             "🛒 3. Özel Ders Talepleri",
+            "🎯 4. YKS Referans Verisi",
         ],
         key="kt_admin_tabs",
         on_change="rerun",
     )
+
 
     with admin_tab1:
         st.subheader("📝 Yeni Öğrenci Kaydı")
@@ -5348,8 +5476,12 @@ if current_user["rol"] == "admin":
         else:
             st.info("Henüz özel ders talebi yok.")
 
+    with admin_tab4:
+        yks_referans_verisi_yonetimi(current_user["id"])
+
     st.markdown("---")
     if st.button("🚪 Yönetici Oturumunu Kapat"):
+
         st.session_state.active_user = None
         st.rerun()
     st.stop()
@@ -9044,32 +9176,6 @@ def sim_sira_metni(sira):
     return "~{:,}".format(int(sira)).replace(",", ".")
 
 
-def sim_noktalari_oku(metin):
-    """'puan;sıra' satırlarını referans noktası listesine çevirir."""
-    noktalar = []
-    for satir_no, satir in enumerate(str(metin or "").splitlines(), start=1):
-        temiz = satir.strip()
-        if not temiz:
-            continue
-        parcalar = [p.strip() for p in temiz.replace("\t", ";").split(";")]
-        if len(parcalar) != 2 or not parcalar[0] or not parcalar[1]:
-            raise ValueError(
-                "%d. satır 'puan;sıra' biçiminde olmalı (örn. 450;6000)."
-                % satir_no
-            )
-        try:
-            puan = float(parcalar[0].replace(",", "."))
-            sira = int(float(parcalar[1].replace(".", "").replace(",", "")))
-        except ValueError:
-            raise ValueError(
-                "%d. satırda puan/sıra sayı değil: %s" % (satir_no, temiz)
-            ) from None
-        noktalar.append({"puan": puan, "sira": sira})
-    if not noktalar:
-        raise ValueError("En az %d nokta girmelisiniz." % osym_verisi.MIN_NOKTA)
-    return noktalar
-
-
 with tab9:
     st.header("🎯 YKS Puan ve Sıralama Simülatörü")
     st.caption(
@@ -9080,7 +9186,6 @@ with tab9:
 
     sim_veri = ranking_engine.veri_durumu()
     sim_model = sim_veri["model"]
-    sim_siralama_ozet = sim_veri["siralama"]
 
     with st.expander("ℹ️ Nasıl hesaplanıyor? Kaynak, yöntem ve sınırlar"):
         st.markdown(
@@ -9641,139 +9746,8 @@ with tab9:
         " verisiyle sınırlıdır."
     )
 
-    if current_user["rol"] == "admin":
-        with st.expander("🛠️ Puan–sıra referans verisi (yönetici)"):
-            st.caption(
-                "Sıralama tahmini bu dosyadan beslenir: `%s`. Kaynaksız kayıt"
-                " kabul edilmez; noktalar puan azalan / sıra artan olmalıdır."
-                % sim_siralama_ozet.get("dosya", osym_verisi.veri_dosyasi())
-            )
-            if sim_siralama_ozet.get("hata"):
-                st.error(sim_siralama_ozet["hata"])
-            st.caption(
-                "Kayıt: %d · Hatalı kayıt: %d · Son güncelleme: %s"
-                % (
-                    sim_siralama_ozet.get("kayit_sayisi") or 0,
-                    sim_siralama_ozet.get("hatali_kayit_sayisi") or 0,
-                    sim_siralama_ozet.get("guncelleme") or "—",
-                )
-            )
-            sim_kaynak_tablosu = sim_siralama_ozet.get("kaynaklar") or []
-            if sim_kaynak_tablosu:
-                st.dataframe(
-                    pd.DataFrame(sim_kaynak_tablosu),
-                    width="stretch",
-                    hide_index=True,
-                )
-            else:
-                st.info(
-                    "Kayıtlı referans verisi yok. Aşağıdaki formdan resmî"
-                    " kaynağa dayanan noktaları ekleyebilirsiniz."
-                )
-
-            with st.form("sim_veri_ekle_formu"):
-                st.markdown("**Referans kaydı ekle / güncelle**")
-                sim_veri_kol1, sim_veri_kol2 = st.columns(2)
-                with sim_veri_kol1:
-                    sim_veri_yil = st.selectbox(
-                        "Sınav yılı",
-                        list(reversed(osym_verisi.desteklenen_yillar())),
-                        key="sim_veri_yil",
-                    )
-                    sim_veri_kurum = st.text_input(
-                        "Kaynak kurum", value="", key="sim_veri_kurum"
-                    )
-                    sim_veri_url = st.text_input(
-                        "Kaynak bağlantısı (URL)", value="", key="sim_veri_url"
-                    )
-                with sim_veri_kol2:
-                    sim_veri_tur = st.selectbox(
-                        "Puan türü",
-                        list(osym_verisi.PUAN_TURLERI),
-                        key="sim_veri_tur",
-                    )
-                    sim_veri_belge = st.text_input(
-                        "Kaynak belge / tablo adı",
-                        value="",
-                        key="sim_veri_belge",
-                    )
-                    sim_veri_erisim = st.text_input(
-                        "Erişim tarihi (YYYY-AA-GG)",
-                        value="",
-                        placeholder="2026-11-11",
-                        key="sim_veri_erisim",
-                    )
-                sim_veri_noktalar = st.text_area(
-                    "Noktalar (her satır: puan;sıra)",
-                    value="",
-                    height=120,
-                    placeholder="500;500\n450;6000\n400;30000",
-                    key="sim_veri_noktalar",
-                )
-                sim_veri_not = st.text_input(
-                    "Not (kapsam / sınırlılık)", value="", key="sim_veri_not"
-                )
-                if st.form_submit_button("💾 Referans kaydını yaz"):
-                    try:
-                        osym_verisi.kayit_ekle(
-                            sim_veri_yil,
-                            sim_veri_tur,
-                            sim_noktalari_oku(sim_veri_noktalar),
-                            {
-                                "kurum": sim_veri_kurum,
-                                "belge": sim_veri_belge,
-                                "url": sim_veri_url,
-                                "erisim_tarihi": sim_veri_erisim or None,
-                            },
-                            not_metni=sim_veri_not,
-                        )
-                    except (ValueError, osym_verisi.VeriHatasi) as sim_veri_hata:
-                        st.error("Kayıt yazılamadı: %s" % sim_veri_hata)
-                    else:
-                        log_islem(
-                            current_user["id"],
-                            "SAVE_RANK_DATA",
-                            "%s / %s" % (sim_veri_yil, sim_veri_tur),
-                        )
-                        set_flash_message(
-                            "success",
-                            "Referans kaydı yazıldı (%s / %s)."
-                            % (sim_veri_yil, sim_veri_tur),
-                        )
-                        st.rerun()
-
-            if sim_kaynak_tablosu:
-                with st.form("sim_veri_sil_formu"):
-                    st.markdown("**Referans kaydı sil**")
-                    sim_sil_secenekleri = [
-                        "%s / %s" % (kayit["yil"], kayit["puan_turu"])
-                        for kayit in sim_kaynak_tablosu
-                    ]
-                    sim_sil_secim = st.selectbox(
-                        "Silinecek kayıt",
-                        sim_sil_secenekleri,
-                        key="sim_sil_secim",
-                    )
-                    if st.form_submit_button("🗑️ Seçili kaydı sil"):
-                        sim_sil_yil, sim_sil_tur = sim_sil_secim.split(" / ")
-                        osym_verisi.kayit_sil(sim_sil_yil, sim_sil_tur)
-                        log_islem(
-                            current_user["id"],
-                            "DELETE_RANK_DATA",
-                            sim_sil_secim,
-                        )
-                        set_flash_message(
-                            "info",
-                            "Referans kaydı silindi: %s" % sim_sil_secim,
-                        )
-                        st.rerun()
-
-
-
-
-
-
-
-
-
-
+    st.caption(
+        "Referans verisi (hangi yıl ve puan türü için puan–sıra noktaları"
+        " bulunduğu) yönetici panelinden yönetilir: **👑 Yönetim → 4. YKS"
+        " Referans Verisi**."
+    )

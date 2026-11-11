@@ -525,6 +525,25 @@ class ReferansVeriTest(SimulatorTestTabani):
             tur for tur in ov.PUAN_TURLERI if tur != "Sayısal"
         ])
 
+    def test_metinden_noktalar(self):
+        noktalar = ov.metinden_noktalar(
+            "500;500\n450;6000\n\n400,5;30.000\n"
+        )
+        self.assertEqual(
+            noktalar,
+            [
+                {"puan": 500.0, "sira": 500},
+                {"puan": 450.0, "sira": 6000},
+                {"puan": 400.5, "sira": 30000},
+            ],
+        )
+
+    def test_metinden_noktalar_hatalari(self):
+        for metin in ("", "500", "abc;100", "500;100\n450;200", "500;abc"):
+            with self.assertRaises(ov.VeriHatasi, msg=metin):
+                ov.metinden_noktalar(metin)
+
+
 
 class SiralamaTahminiTest(SimulatorTestTabani):
     """Sıralama tahmini yalnızca doğrulanmış veriyle üretilir."""

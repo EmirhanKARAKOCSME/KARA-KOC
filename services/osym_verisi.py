@@ -464,7 +464,42 @@ def kayit_dogrula(kayit):
     return hatalar
 
 
+def metinden_noktalar(metin):
+    """'puan;sıra' satırlarını referans noktası listesine çevirir.
+
+    Yönetici formundaki serbest metni güvenli biçimde ayrıştırır. Eksik,
+    sayısal olmayan veya boş girişte VeriHatasi üretir (sessiz tahmin yok).
+    """
+    noktalar = []
+    for satir_no, satir in enumerate(str(metin or "").splitlines(), start=1):
+        temiz = satir.strip()
+        if not temiz:
+            continue
+        ham = temiz.replace("\t", ";").replace("|", ";")
+        parcalar = [parca.strip() for parca in ham.split(";")]
+        if len(parcalar) != 2 or not parcalar[0] or not parcalar[1]:
+            raise VeriHatasi(
+                "%d. satır 'puan;sıra' biçiminde olmalı (örn. 450;6000)."
+                % satir_no
+            )
+        try:
+            puan = float(parcalar[0].replace(",", "."))
+            sira = int(float(parcalar[1].replace(".", "").replace(" ", "")))
+        except (TypeError, ValueError):
+            raise VeriHatasi(
+                "%d. satırda puan/sıra sayı değil: %s" % (satir_no, temiz)
+            ) from None
+        noktalar.append({"puan": puan, "sira": sira})
+    if len(noktalar) < MIN_NOKTA:
+        raise VeriHatasi(
+            "En az %d referans noktası gerekir (girilen: %d)."
+            % (MIN_NOKTA, len(noktalar))
+        )
+    return noktalar
+
+
 def kayit_normalize(kayit):
+
     """Doğrulanmış kaydı yazılabilir, sade bir sözlüğe çevirir."""
     temiz_noktalar = []
     for nokta in kayit.get("noktalar") or []:
