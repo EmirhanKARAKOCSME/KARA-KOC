@@ -3288,8 +3288,11 @@ def akilli_program_motoru_v2_uygula(
 if "active_user" not in st.session_state:
     st.session_state.active_user = None
 
-if "active_main_tab" not in st.session_state:
-    st.session_state.active_main_tab = 0
+# SEKME DURUMU (FAZ 1): Sekme seçimi artık sunucu tarafında kalıcıdır.
+# Her sekme grubu kendi anahtarını kullanır (st.tabs(key=..., on_change="rerun")):
+#   kt_main_tabs, kt_ders_tabs, kt_deneme_grafik_tabs,
+#   kt_program_gun_tabs, kt_rapor_tabs, kt_admin_tabs
+# Eski "active_main_tab" değişkeni hiçbir yerde okunmadığı için kaldırıldı.
 
 if not st.session_state.active_user:
     st.title("🎯 KARAKOÇ YKS Akıllı Koçluk Sistemi")
@@ -3660,11 +3663,15 @@ if current_user["rol"] == "admin":
         " yönetebilir, düzenleyebilir ve ders taleplerini inceleyebilirsiniz."
     )
 
-    admin_tab1, admin_tab2, admin_tab3 = st.tabs([
-        "➕ 1. Yeni Öğrenci Ekle",
-        "👥 2. Öğrenci Düzenleme & Yönetim",
-        "🛒 3. Özel Ders Talepleri",
-    ])
+    admin_tab1, admin_tab2, admin_tab3 = st.tabs(
+        [
+            "➕ 1. Yeni Öğrenci Ekle",
+            "👥 2. Öğrenci Düzenleme & Yönetim",
+            "🛒 3. Özel Ders Talepleri",
+        ],
+        key="kt_admin_tabs",
+        on_change="rerun",
+    )
 
     with admin_tab1:
         st.subheader("📝 Yeni Öğrenci Kaydı")
@@ -4123,14 +4130,18 @@ if alarmlar_db["kirmizi"]:
         )
 
 # YENİ ARAYÜZ MİMARİSİ: 6 SEKMELİ DÜZEN VE SEKME SIÇRAMA KORUMASI
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🎯 Bugünün Görevleri (Odak Ekranı)",
-    "📚 Konu Takip & İlerleme",
-    "📝 Deneme Analizi",
-    "🚨 Konu Uyarıları & Alarmlar",
-    "📅 Haftalık Çalışma Programı & ÖSYM Simülatörü",
-    "🤝 Özel Ders & Raporlar",
-])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    [
+        "🎯 Bugünün Görevleri (Odak Ekranı)",
+        "📚 Konu Takip & İlerleme",
+        "📝 Deneme Analizi",
+        "🚨 Konu Uyarıları & Alarmlar",
+        "📅 Haftalık Çalışma Programı & ÖSYM Simülatörü",
+        "🤝 Özel Ders & Raporlar",
+    ],
+    key="kt_main_tabs",
+    on_change="rerun",
+)
 
 
 def on_mikro_change(ders_adi, makro_adi, mikro_ad, key_name):
@@ -4333,7 +4344,11 @@ with tab2:
     alt_durum_seti = set(alt_durumlari_yukle(current_user["id"]))
 
     if aktif_mufredat_hiyerarsisi:
-        ders_tablari = st.tabs(list(aktif_mufredat_hiyerarsisi.keys()))
+        ders_tablari = st.tabs(
+            list(aktif_mufredat_hiyerarsisi.keys()),
+            key="kt_ders_tabs",
+            on_change="rerun",
+        )
 
         for i, (ders_adi, makro_konular) in enumerate(
             aktif_mufredat_hiyerarsisi.items()
@@ -4851,7 +4866,9 @@ with tab3:
     )
 
     grafik_tab1, grafik_tab2, grafik_tab3 = st.tabs(
-        ["📈 TYT Denemeleri", "📈 AYT Denemeleri", "🔍 Hata Nedenleri"]
+        ["📈 TYT Denemeleri", "📈 AYT Denemeleri", "🔍 Hata Nedenleri"],
+        key="kt_deneme_grafik_tabs",
+        on_change="rerun",
     )
 
     with grafik_tab1:
@@ -5474,7 +5491,11 @@ with tab5:
             "Cumartesi",
             "Pazar",
         ]
-        gun_tablari = st.tabs(gun_listesi)
+        gun_tablari = st.tabs(
+            gun_listesi,
+            key="kt_program_gun_tabs",
+            on_change="rerun",
+        )
 
         for g_idx, g_ad in enumerate(gun_listesi):
             with gun_tablari[g_idx]:
@@ -5534,10 +5555,14 @@ with tab5:
 with tab6:
     st.header("🤝 Özel Ders Talepleri & Çalışma Raporları")
     
-    rep_tab1, rep_tab2 = st.tabs([
-        "🛒 Özel Ders Taleplerim",
-        "📊 Detaylı Performans & İletişim Logları",
-    ])
+    rep_tab1, rep_tab2 = st.tabs(
+        [
+            "🛒 Özel Ders Taleplerim",
+            "📊 Detaylı Performans & İletişim Logları",
+        ],
+        key="kt_rapor_tabs",
+        on_change="rerun",
+    )
     
     with rep_tab1:
         st.subheader("📌 Mevcut Özel Ders Talepleri")
