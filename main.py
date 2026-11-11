@@ -14,6 +14,8 @@ from services import spaced_repetition
 from services import wrong_questions
 from services import gorev_kaynaklari
 from services import weekly_report
+from services import osym_verisi
+from services import ranking_engine
 
 # ==============================================================================
 # SİSTEM VE ZAMAN DİLİMİ AYARLARI (UTC+3 TÜRKİYE SAATİ)
@@ -1487,6 +1489,9 @@ gorev_kaynaklari.init_db()
 # FAZ 7: haftalık performans raporu hedef + değerlendirme şeması
 # (idempotent; rapor anlık görüntü almaz, canlı veriden üretilir).
 weekly_report.init_db()
+
+# FAZ 8: hedef net tablosu (idempotent; mevcut netlerin üzerine yazmaz).
+ranking_engine.init_db()
 
 def sanitize_key(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]", "_", str(text))
@@ -3161,149 +3166,14 @@ mufredat_klasik = {
 
 
 # ==============================================================================
-# HESAPLAMA MOTORU (ÖSYM PUAN & SIRALAMA)
+# FAZ 8: ÖSYM PUAN & SIRALAMA HESABI SERVİS KATMANINA TAŞINDI
 # ==============================================================================
-def hesapla_yks_puan_ve_siralama(netler: dict, diploma_notu: float, alan: str):
-    obp_puan = min(100.0, max(50.0, diploma_notu)) * 5.0
-    obp_katkisi = obp_puan * 0.12
-
-    t_tur = netler.get("tyt_turkce", 0.0)
-    t_mat = netler.get("tyt_mat", 0.0)
-    t_sos = netler.get("tyt_sosyal", 0.0)
-    t_fen = netler.get("tyt_fen", 0.0)
-
-    a_mat = netler.get("ayt_mat", 0.0)
-    a_fiz = netler.get("ayt_fizik", 0.0)
-    a_kim = netler.get("ayt_kimya", 0.0)
-    a_biy = netler.get("ayt_biyoloji", 0.0)
-
-    a_edb = netler.get("ayt_edebiyat", 0.0)
-    a_tar1 = netler.get("ayt_tarih1", 0.0)
-    a_cog1 = netler.get("ayt_cog1", 0.0)
-    a_tar2 = netler.get("ayt_tarih2", 0.0)
-    a_cog2 = netler.get("ayt_cog2", 0.0)
-    a_fel = netler.get("ayt_felsefe", 0.0)
-    a_din = netler.get("ayt_din", 0.0)
-
-    y_ing = netler.get("ydt_ing", 0.0)
-
-    tyt_ham = (
-        100.0 + (t_tur * 3.3) + (t_mat * 3.3) + (t_sos * 3.4) + (t_fen * 3.4)
-    )
-    tyt_ayt_katkisi = (
-        (t_tur * 1.32) + (t_mat * 1.32) + (t_sos * 1.36) + (t_fen * 1.36)
-    )
-
-    say_ham = (
-        100.0
-        + tyt_ayt_katkisi
-        + (a_mat * 3.0)
-        + (a_fiz * 2.85)
-        + (a_kim * 3.07)
-        + (a_biy * 3.07)
-    )
-    ea_ham = (
-        100.0
-        + tyt_ayt_katkisi
-        + (a_mat * 3.0)
-        + (a_edb * 3.0)
-        + (a_tar1 * 2.8)
-        + (a_cog1 * 3.33)
-    )
-    soz_ham = (
-        100.0
-        + tyt_ayt_katkisi
-        + (a_edb * 3.0)
-        + (a_tar1 * 2.8)
-        + (a_cog1 * 3.33)
-        + (a_tar2 * 2.91)
-        + (a_cog2 * 2.91)
-        + (a_fel * 3.0)
-        + (a_din * 3.33)
-    )
-    dil_ham = 100.0 + tyt_ayt_katkisi + (y_ing * 3.0)
-
-    y_tyt = min(560.0, tyt_ham + obp_katkisi)
-    y_say = min(560.0, say_ham + obp_katkisi)
-    y_ea = min(560.0, ea_ham + obp_katkisi)
-    y_soz = min(560.0, soz_ham + obp_katkisi)
-    y_dil = min(560.0, dil_ham + obp_katkisi)
-
-    def interpolate_rank(puan, points_map):
-        sorted_p = sorted(points_map.keys(), reverse=True)
-        if puan >= sorted_p[0]:
-            return max(
-                1, int(points_map[sorted_p[0]] * (500.0 / max(500.01, puan)))
-            )
-        if puan <= sorted_p[-1]:
-            return int(points_map[sorted_p[-1]] * 1.3)
-        for i in range(len(sorted_p) - 1):
-            p1, p2 = sorted_p[i], sorted_p[i + 1]
-            if p2 <= puan <= p1:
-                r1, r2 = points_map[p1], points_map[p2]
-                frac = (p1 - puan) / (p1 - p2)
-                return int(r1 + frac * (r2 - r1))
-        return 100000
-
-    say_map = {
-        500: 51,
-        440: 22370,
-        400: 58728,
-        360: 100553,
-        320: 153304,
-        280: 228643,
-        240: 344536,
-    }
-    ea_map = {
-        500: 15,
-        440: 874,
-        400: 4545,
-        360: 23452,
-        320: 89520,
-        280: 210499,
-        240: 440752,
-    }
-    soz_map = {
-        500: 5,
-        440: 214,
-        400: 1418,
-        360: 10259,
-        320: 47292,
-        280: 148959,
-        240: 360487,
-    }
-    tyt_map = {
-        500: 51,
-        440: 17050,
-        400: 67394,
-        360: 155008,
-        320: 302758,
-        280: 577094,
-        240: 1045340,
-    }
-
-    siralamalar = {
-        "TYT": interpolate_rank(y_tyt, tyt_map),
-        "Sayısal": interpolate_rank(y_say, say_map),
-        "Eşit Ağırlık": interpolate_rank(y_ea, ea_map),
-        "Sözel": interpolate_rank(y_soz, soz_map),
-        "Dil": interpolate_rank(y_dil, say_map),
-    }
-
-    return {
-        "tyt_ham": round(tyt_ham, 2),
-        "say_ham": round(say_ham, 2),
-        "ea_ham": round(ea_ham, 2),
-        "soz_ham": round(soz_ham, 2),
-        "y_tyt": round(y_tyt, 2),
-        "y_say": round(y_say, 2),
-        "y_ea": round(y_ea, 2),
-        "y_soz": round(y_soz, 2),
-        "y_dil": round(y_dil, 2),
-        "obp_katkisi": round(obp_katkisi, 2),
-        "tahmini_siralama": siralamalar.get(alan, siralamalar["Sayısal"]),
-    }
-
+# Eski sürümde burada, kaynağı doğrulanmamış sabit puan-sıra tabloları ve
+# tek formüle gömülü katsayılar bulunuyordu. FAZ 8 ile:
+#   - hesaplama  -> services/ranking_engine.py
+#   - yıl kuralları + puan-sıra referans verisi -> services/osym_verisi.py
+#   - arayüz     -> "🎯 YKS Simülatörü" sekmesi (9. sekme)
+# Resmî kaynakla doğrulanmamış hiçbir sıralama sayısı üretilmez.
 
 # ==============================================================================
 # GİRİŞ FORMU VE OTURUM KONTROLÜ
@@ -5624,23 +5494,26 @@ if alarmlar_db["kirmizi"]:
             f" **{a['aksiyon']}**"
         )
 
-# YENİ ARAYÜZ MİMARİSİ: 7 SEKMELİ DÜZEN VE SEKME SIÇRAMA KORUMASI
+# YENİ ARAYÜZ MİMARİSİ: 9 SEKMELİ DÜZEN VE SEKME SIÇRAMA KORUMASI
 # FAZ 6B: "📕 Yanlış Soru Defteri" sekmesi Deneme Analizi'nden hemen sonra
 # gelir (akış: deneme gir -> yanlış soruları deftere işle -> program üret).
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+# FAZ 8: "🎯 YKS Simülatörü" sekmesi sona eklendi (puan + sıralama tahmini).
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
     [
         "🎯 Bugünün Görevleri",
         "📚 Konu Takip & İlerleme",
         "📝 Deneme Analizi",
         "📕 Yanlış Soru Defteri",
         "🚨 Konu Uyarıları & Alarmlar",
-        "📅 Haftalık Çalışma Programı & ÖSYM Simülatörü",
+        "📅 Haftalık Çalışma Programı",
         "🤝 Özel Ders & Raporlar",
         "📈 Haftalık Performans",
+        "🎯 YKS Simülatörü",
     ],
     key="kt_main_tabs",
     on_change="rerun",
 )
+
 
 
 def on_mikro_change(ders_adi, makro_adi, mikro_ad, key_name):
@@ -8027,119 +7900,17 @@ with tab6:
                 st.rerun()
 
     with col_p2:
-        st.subheader("🏆 Tahmini ÖSYM Sıralama Simülatörü")
-
-        with st.expander("📊 Sınav Netlerinizi Giriniz", expanded=True):
-            col_sim1, col_sim2 = st.columns(2)
-            with col_sim1:
-                st.markdown("**TYT Netleriniz:**")
-                s_t_tur = st.number_input(
-                    "TYT Türkçe (40):", 0.0, 40.0, 25.0, 0.5
-                )
-                s_t_mat = st.number_input(
-                    "TYT Matematik (40):", 0.0, 40.0, 20.0, 0.5
-                )
-                s_t_sos = st.number_input(
-                    "TYT Sosyal (20):", 0.0, 20.0, 12.0, 0.5
-                )
-                s_t_fen = st.number_input("TYT Fen (20):", 0.0, 20.0, 10.0, 0.5)
-
-            sim_netler = {
-                "tyt_turkce": s_t_tur,
-                "tyt_mat": s_t_mat,
-                "tyt_sosyal": s_t_sos,
-                "tyt_fen": s_t_fen,
-            }
-            target_alan = current_user["hedef_alan"]
-
-            with col_sim2:
-                st.markdown(f"**{target_alan} AYT/YDT Netleriniz:**")
-                if target_alan == "Sayısal":
-                    sim_netler["ayt_mat"] = st.number_input(
-                        "AYT Matematik (40):", 0.0, 40.0, 22.0, 0.5
-                    )
-                    sim_netler["ayt_fizik"] = st.number_input(
-                        "AYT Fizik (14):", 0.0, 14.0, 7.0, 0.5
-                    )
-                    sim_netler["ayt_kimya"] = st.number_input(
-                        "AYT Kimya (13):", 0.0, 13.0, 6.0, 0.5
-                    )
-                    sim_netler["ayt_biyoloji"] = st.number_input(
-                        "AYT Biyoloji (13):", 0.0, 13.0, 6.0, 0.5
-                    )
-                elif target_alan == "Eşit Ağırlık":
-                    sim_netler["ayt_mat"] = st.number_input(
-                        "AYT Matematik (40):", 0.0, 40.0, 20.0, 0.5
-                    )
-                    sim_netler["ayt_edebiyat"] = st.number_input(
-                        "AYT Edebiyat (24):", 0.0, 24.0, 15.0, 0.5
-                    )
-                    sim_netler["ayt_tarih1"] = st.number_input(
-                        "AYT Tarih-1 (10):", 0.0, 10.0, 6.0, 0.5
-                    )
-                    sim_netler["ayt_cog1"] = st.number_input(
-                        "AYT Coğrafya-1 (6):", 0.0, 6.0, 4.0, 0.5
-                    )
-                elif target_alan == "Sözel":
-                    sim_netler["ayt_edebiyat"] = st.number_input(
-                        "AYT Edebiyat (24):", 0.0, 24.0, 18.0, 0.5
-                    )
-                    sim_netler["ayt_tarih1"] = st.number_input(
-                        "AYT Tarih-1 (10):", 0.0, 10.0, 7.0, 0.5
-                    )
-                    sim_netler["ayt_cog1"] = st.number_input(
-                        "AYT Coğrafya-1 (6):", 0.0, 6.0, 5.0, 0.5
-                    )
-                    sim_netler["ayt_tarih2"] = st.number_input(
-                        "AYT Tarih-2 (11):", 0.0, 11.0, 7.0, 0.5
-                    )
-                    sim_netler["ayt_cog2"] = st.number_input(
-                        "AYT Coğrafya-2 (11):", 0.0, 11.0, 8.0, 0.5
-                    )
-                    sim_netler["ayt_felsefe"] = st.number_input(
-                        "AYT Felsefe Gr. (12):", 0.0, 12.0, 8.0, 0.5
-                    )
-                    sim_netler["ayt_din"] = st.number_input(
-                        "AYT Din Kültürü (6):", 0.0, 6.0, 4.0, 0.5
-                    )
-                elif target_alan == "Dil":
-                    sim_netler["ydt_ing"] = st.number_input(
-                        "YDT İngilizce (80):", 0.0, 80.0, 60.0, 1.0
-                    )
-
-            hesap_sonuc = hesapla_yks_puan_ve_siralama(
-                sim_netler,
-                float(current_user.get("diploma_notu", 85.0)),
-                current_user["hedef_alan"],
-            )
-
-        st.markdown(
-            '<div class="sim-card"><h4>🎯 Tahmini Yerleştirme ve Sıralama</h4></div>',
-            unsafe_allow_html=True,
+        st.subheader("🎯 YKS Puan ve Sıralama Simülatörü")
+        st.info(
+            "Simülatör kendi sekmesine taşındı: **🎯 YKS Simülatörü**.\n\n"
+            "Orada son denemelerinizden veya manuel girişten netlerinizi\n"
+            "kullanarak model puanınızı, hedef net karşılaştırmanızı ve\n"
+            "(doğrulanmış veri varsa) sıralama tahmininizi görebilirsiniz."
         )
-        col_res1, col_res2 = st.columns(2)
-        with col_res1:
-            st.metric("📊 TYT Yerleştirme Puanı", f"{hesap_sonuc['y_tyt']}")
-            yerlesme_puan = (
-                hesap_sonuc["y_say"]
-                if target_alan == "Sayısal"
-                else (
-                    hesap_sonuc["y_ea"]
-                    if target_alan == "Eşit Ağırlık"
-                    else (
-                        hesap_sonuc["y_soz"]
-                        if target_alan == "Sözel"
-                        else hesap_sonuc["y_dil"]
-                    )
-                )
-            )
-            st.metric(f"🎓 Yerleştirme ({target_alan})", f"{yerlesme_puan}")
-            st.caption(f"➕ OBP Katkısı (+{hesap_sonuc['obp_katkisi']} Puan)")
-        with col_res2:
-            st.metric(
-                "🏆 Tahmini Türkiye Sıralaması",
-                f"~{hesap_sonuc['tahmini_siralama']:,} / {target_alan}",
-            )
+        st.caption(
+            "Eski sürümdeki sabit sıralama tabloları kaldırıldı: kaynağı\n"
+            "doğrulanmamış sıralama sayıları gösterilmiyor."
+        )
 
     st.markdown("---")
     _onceki_programlar_bolumu(current_user["id"])
@@ -9189,4 +8960,770 @@ with tab8:
                                 "- *%s* %s"
                                 % (alan_sorusu, gecmis_kayit[alan_kolonu])
                             )
+
+
+# ==============================================================================
+# FAZ 8: YKS PUAN VE SIRALAMA SİMÜLATÖRÜ (9. SEKME)
+# ==============================================================================
+# Hesaplama `services/ranking_engine.py`, yıl kuralı ve puan-sıra referans
+# verisi `services/osym_verisi.py` içindedir. Bu bölüm yalnızca arayüzdür:
+# hiçbir katsayı veya sıralama sayısı burada tanımlanmaz.
+SIM_KAYNAK_OTO = "Son denemelerimden otomatik"
+SIM_KAYNAK_MANUEL = "Manuel giriş"
+SIM_KAYNAK_HEDEF = "Hedef netlerim"
+
+SIM_DURUM_ETIKETLERI = {
+    "hedefte": "✅ Hedefte",
+    "hedefin_altinda": "⬇️ Hedefin altında",
+    "hedef_yok": "— Hedef yok",
+    "mevcut_yok": "— Deneme yok",
+    "veri_yok": "— Veri yok",
+}
+
+SIM_SIRALAMA_NOTLARI = {
+    "veri_yok": (
+        "Sıralama tahmini üretilmedi: seçilen yıl ve puan türü için"
+        " doğrulanmış puan–sıra referans verisi yok."
+    ),
+    "veri_yetersiz": (
+        "Sıralama tahmini üretilmedi: referans noktası sayısı yetersiz."
+    ),
+    "aralik_disi": (
+        "Sıralama tahmini üretilmedi: puan, girilen referans noktalarının"
+        " puan aralığının dışında."
+    ),
+}
+
+
+def sim_puan_turu_varsayilani(hedef_alan):
+    """Öğrencinin hedef alanını puan türüne çevirir (geçersizse Sayısal)."""
+    try:
+        return osym_verisi.puan_turu_kontrol(hedef_alan)
+    except osym_verisi.VeriHatasi:
+        return "Sayısal"
+
+
+def sim_sira_metni(sira):
+    """18000 -> '~18.000' (okunur biçim)."""
+    if sira is None:
+        return "—"
+    return "~{:,}".format(int(sira)).replace(",", ".")
+
+
+def sim_noktalari_oku(metin):
+    """'puan;sıra' satırlarını referans noktası listesine çevirir."""
+    noktalar = []
+    for satir_no, satir in enumerate(str(metin or "").splitlines(), start=1):
+        temiz = satir.strip()
+        if not temiz:
+            continue
+        parcalar = [p.strip() for p in temiz.replace("\t", ";").split(";")]
+        if len(parcalar) != 2 or not parcalar[0] or not parcalar[1]:
+            raise ValueError(
+                "%d. satır 'puan;sıra' biçiminde olmalı (örn. 450;6000)."
+                % satir_no
+            )
+        try:
+            puan = float(parcalar[0].replace(",", "."))
+            sira = int(float(parcalar[1].replace(".", "").replace(",", "")))
+        except ValueError:
+            raise ValueError(
+                "%d. satırda puan/sıra sayı değil: %s" % (satir_no, temiz)
+            ) from None
+        noktalar.append({"puan": puan, "sira": sira})
+    if not noktalar:
+        raise ValueError("En az %d nokta girmelisiniz." % osym_verisi.MIN_NOKTA)
+    return noktalar
+
+
+with tab9:
+    st.header("🎯 YKS Puan ve Sıralama Simülatörü")
+    st.caption(
+        "Netlerinizden **model puan** hesaplanır. Sıralama tahmini yalnızca"
+        " doğrulanmış puan–sıra referans verisi varsa üretilir; bu ekran resmî"
+        " ÖSYM sonucu göstermez."
+    )
+
+    sim_veri = ranking_engine.veri_durumu()
+    sim_model = sim_veri["model"]
+    sim_siralama_ozet = sim_veri["siralama"]
+
+    with st.expander("ℹ️ Nasıl hesaplanıyor? Kaynak, yöntem ve sınırlar"):
+        st.markdown(
+            "**Puan (model):** 100 taban puan + her testin neti × test katsayısı"
+            " + OBP katkısı. Net = doğru − yanlış / 4."
+        )
+        st.markdown(
+            "**OBP:** OBP = diploma notu × 5, katkı = OBP × 0.12 (en fazla 60"
+            " puan). OBP'yi puana ekleyip eklememek sizin seçiminizdir."
+        )
+        st.markdown(
+            "**Sıralama:** yalnızca `data/osym_puan_sira.json` içindeki"
+            " doğrulanmış puan–sıra noktaları kullanılır. Noktalar arasında"
+            " doğrusal tahmin yapılır; aralık dışına tahmin üretilmez."
+        )
+        st.warning(sim_model["kaynak"]["sinirlilik"], icon="⚠️")
+        st.caption(
+            "Kural kaynağı: %s · %s"
+            % (sim_model["kaynak"]["kurum"], sim_model["kaynak"]["belge"])
+        )
+        st.caption(
+            "Desteklenen sınav yılları: %s – %s · Katsayı seti doğrulama durumu:"
+            " **%s**"
+            % (
+                sim_model["yillar"][0],
+                sim_model["yillar"][-1],
+                sim_model["dogrulama_durumu"],
+            )
+        )
+
+    sim_puan_turu_varsayilan = sim_puan_turu_varsayilani(
+        current_user.get("hedef_alan")
+    )
+    sim_puan_turu_listesi = list(osym_verisi.PUAN_TURLERI)
+    sim_kol_puan, sim_kol_yil, sim_kol_obp, sim_kol_obp_secim = st.columns(
+        [1.2, 1, 1, 1]
+    )
+    with sim_kol_puan:
+        sim_puan_turu = st.selectbox(
+            "Puan türü",
+            sim_puan_turu_listesi,
+            index=sim_puan_turu_listesi.index(sim_puan_turu_varsayilan),
+            key="sim_puan_turu",
+        )
+    with sim_kol_yil:
+        sim_yil_listesi = list(reversed(osym_verisi.desteklenen_yillar()))
+        sim_yil = st.selectbox(
+            "Sınav yılı", sim_yil_listesi, index=0, key="sim_yil"
+        )
+    with sim_kol_obp:
+        sim_diploma = st.number_input(
+            "Diploma notu (OBP)",
+            min_value=50.0,
+            max_value=100.0,
+            value=float(current_user.get("diploma_notu") or 85.0),
+            step=0.1,
+            key="sim_diploma",
+        )
+    with sim_kol_obp_secim:
+        sim_obp_dahil = st.toggle(
+            "OBP'yi puana ekle", value=True, key="sim_obp_dahil"
+        )
+    st.caption(
+        "OBP %.0f → katkı +%.2f puan (diploma notunu değiştirmek için kenar"
+        " çubuğundaki **Profili Güncelle** formunu kullanın)."
+        % (
+            osym_verisi.obp_puani(sim_diploma),
+            osym_verisi.obp_katkisi(sim_diploma, sim_yil),
+        )
+    )
+
+    sim_mevcut = ranking_engine.mevcut_netler(current_user["id"])
+    sim_hedefler = ranking_engine.hedef_netleri_getir(
+        current_user["id"], sim_puan_turu
+    )
+
+    sim_kaynak_listesi = [SIM_KAYNAK_OTO, SIM_KAYNAK_MANUEL]
+    if sim_hedefler:
+        sim_kaynak_listesi.append(SIM_KAYNAK_HEDEF)
+    sim_varsayilan_kaynak = (
+        SIM_KAYNAK_OTO if sim_mevcut["kayit_var"] else SIM_KAYNAK_MANUEL
+    )
+    sim_kaynak = st.radio(
+        "Netler nereden gelsin?",
+        sim_kaynak_listesi,
+        index=sim_kaynak_listesi.index(sim_varsayilan_kaynak),
+        horizontal=True,
+        key="sim_kaynak_%s" % sanitize_key(sim_puan_turu),
+    )
+
+    if sim_kaynak == SIM_KAYNAK_OTO:
+        if not sim_mevcut["kayit_var"]:
+            st.info(
+                "Ders bazlı net içeren genel denemeniz henüz yok. Netleri"
+                " **Manuel giriş** ile girebilirsiniz; **Deneme Analizi**"
+                " sekmesinde ders detayı girerseniz bu alan otomatik dolar.",
+                icon="ℹ️",
+            )
+            sim_son_deneme = ranking_engine.VARSAYILAN_SON_DENEME
+        else:
+            sim_son_deneme = st.slider(
+                "Kaç son genel denemenin ortalaması alınsın?",
+                min_value=1,
+                max_value=ranking_engine.MAKS_SON_DENEME,
+                value=ranking_engine.VARSAYILAN_SON_DENEME,
+                key="sim_son_deneme",
+            )
+            sim_mevcut = ranking_engine.mevcut_netler(
+                current_user["id"], son_deneme=sim_son_deneme
+            )
+            sim_deneme_ozeti = ", ".join(
+                "%s: %d" % (tur, adet)
+                for tur, adet in sim_mevcut["deneme_sayisi"].items()
+                if adet
+            )
+            st.caption(
+                "%s · %s"
+                % (
+                    sim_mevcut["yontem"] or "Deneme verisi yok",
+                    sim_deneme_ozeti or "—",
+                )
+            )
+            for sim_uyari in sim_mevcut["uyarilar"]:
+                st.caption("• %s" % sim_uyari)
+    elif sim_kaynak == SIM_KAYNAK_HEDEF:
+        st.caption(
+            "Netler kaydettiğiniz hedef netlerden geliyor. Hedef netler ayrı"
+            " saklanır ve mevcut deneme netlerinizin üzerine yazılmaz."
+        )
+    else:
+        st.caption(
+            "Netleri kendiniz girin. Girdiğiniz değerler otomatik olarak"
+            " kaydedilmez; yalnızca bu ekrandaki tahmin için kullanılır."
+        )
+
+    sim_kaynak_kodu = {
+        SIM_KAYNAK_OTO: "oto",
+        SIM_KAYNAK_MANUEL: "manuel",
+        SIM_KAYNAK_HEDEF: "hedef",
+    }[sim_kaynak]
+    sim_on_dolu = {}
+    if sim_kaynak_kodu == "oto":
+        sim_on_dolu.update(sim_mevcut["tyt"])
+        sim_on_dolu.update(sim_mevcut["ayt"])
+    elif sim_kaynak_kodu == "hedef":
+        sim_on_dolu.update(sim_hedefler)
+
+    sim_netler = {}
+    with st.expander(
+        "📊 Test netleri (düzenlenebilir)",
+        expanded=(sim_kaynak_kodu == "manuel"),
+    ):
+        st.caption(
+            "Net = doğru − yanlış / 4. Değerler 0 ile testin soru sayısı"
+            " arasında olmalıdır."
+        )
+        sim_test_kolonlari = st.columns(2)
+        for sim_indeks, sim_test in enumerate(
+            ranking_engine.gereken_testler(sim_puan_turu)
+        ):
+            sim_soru_sayisi = osym_verisi.test_soru_sayisi(sim_test) or 40
+            sim_net_anahtari = "sim_net_%s_%s" % (
+                sim_kaynak_kodu,
+                sanitize_key(sim_test),
+            )
+            if sim_net_anahtari not in st.session_state:
+                st.session_state[sim_net_anahtari] = round(
+                    float(sim_on_dolu.get(sim_test, 0.0)), 2
+                )
+            with sim_test_kolonlari[sim_indeks % 2]:
+                sim_netler[sim_test] = st.number_input(
+                    "%s (0–%d)" % (sim_test, sim_soru_sayisi),
+                    min_value=0.0,
+                    max_value=float(sim_soru_sayisi),
+                    step=0.25,
+                    key=sim_net_anahtari,
+                )
+
+    try:
+        sim_paket = ranking_engine.simulasyon(
+            sim_netler, sim_puan_turu, sim_yil, sim_diploma, sim_obp_dahil
+        )
+    except (osym_verisi.VeriHatasi, ranking_engine.SimulatorHatasi) as sim_hata:
+        st.error("Simülasyon hesaplanamadı: %s" % sim_hata)
+        sim_paket = None
+
+    sim_puan = None
+    sim_siralama = None
+    if sim_paket is not None:
+        sim_puan = sim_paket["puan"]
+        sim_siralama = sim_paket["siralama"]
+        if sim_puan["durum"] != ranking_engine.DURUM_OK:
+            st.error(
+                "Puan hesaplanamadı: %s"
+                % "; ".join(sim_puan.get("uyarilar") or ["eksik veri"])
+            )
+            sim_puan = None
+
+    if sim_puan is not None:
+        sim_k1, sim_k2, sim_k3 = st.columns(3)
+        with sim_k1:
+            st.metric(
+                "Model yerleştirme puanı",
+                "%.2f" % sim_puan["puan"],
+                help="Resmî ÖSYM puanı değildir; doğrusal model tahminidir.",
+            )
+            st.caption(
+                "OBP hariç: %.2f · OBP katkısı: +%.2f"
+                % (sim_puan["puan_obp_haric"], sim_puan["obp_katkisi"])
+            )
+        with sim_k2:
+            st.metric("TYT neti", "%.2f" % sim_puan["tyt_net"])
+            if sim_puan_turu == "TYT":
+                st.caption("TYT puan türünde alan testi kullanılmaz.")
+            else:
+                st.caption("Alan neti: %.2f" % sim_puan["alan_net"])
+        with sim_k3:
+            st.metric(
+                "Tahmini sıralama",
+                sim_sira_metni(
+                    sim_siralama.get("sira") if sim_siralama else None
+                ),
+            )
+            st.caption(
+                (
+                    "Senaryo aralığı: %s – %s"
+                    % (
+                        sim_sira_metni(sim_siralama["aralik"][0]),
+                        sim_sira_metni(sim_siralama["aralik"][1]),
+                    )
+                )
+                if sim_siralama and sim_siralama.get("aralik")
+                else "Sıralama aralığı bu veriyle hesaplanamıyor."
+            )
+
+        with st.expander("📐 Puan katkıları (test bazında)"):
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Test": sim_satir["test"],
+                            "Net": "%.2f" % sim_satir["net"],
+                            "Katsayı": "%.2f" % sim_satir["katsayi"],
+                            "Puan katkısı": "%.2f" % sim_satir["katki"],
+                        }
+                        for sim_satir in sim_puan["test_katkilari"]
+                    ]
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+            st.caption(
+                "Taban puan %.0f + katkılar = %.2f (ham puan). OBP %s."
+                % (
+                    sim_puan["kural"]["taban_puan"],
+                    sim_puan["ham_puan"],
+                    ("eklendi (+%.2f)" % sim_puan["obp_katkisi"])
+                    if sim_puan["obp_dahil"]
+                    else "eklenmedi",
+                )
+            )
+
+    st.divider()
+    st.subheader("🏆 Başarı sıralaması tahmini")
+    if sim_siralama is None:
+        st.info("Puan hesaplanmadan sıralama tahmini yapılamaz.")
+    elif sim_siralama["durum"] == ranking_engine.DURUM_OK:
+        sim_sol, sim_sag = st.columns([1, 2])
+        with sim_sol:
+            st.metric("Tahmini sıra", sim_sira_metni(sim_siralama["sira"]))
+            if sim_siralama.get("aralik"):
+                st.caption(
+                    "Senaryo aralığı: %s – %s"
+                    % (
+                        sim_sira_metni(sim_siralama["aralik"][0]),
+                        sim_sira_metni(sim_siralama["aralik"][1]),
+                    )
+                )
+        with sim_sag:
+            for sim_not in sim_siralama.get("notlar") or []:
+                st.caption("• %s" % sim_not)
+            st.caption(
+                "Referans verisi olan yıllar (%s): %s"
+                % (
+                    sim_puan_turu,
+                    ", ".join(sim_siralama.get("kapsanan_yillar") or []) or "—",
+                )
+            )
+            sim_veri_kaynagi = sim_siralama.get("kaynak") or {}
+            if sim_veri_kaynagi:
+                st.caption(
+                    "Kaynak: %s · %s · Erişim: %s"
+                    % (
+                        sim_veri_kaynagi.get("kurum") or "—",
+                        sim_veri_kaynagi.get("belge") or "—",
+                        sim_veri_kaynagi.get("erisim_tarihi") or "belirtilmemiş",
+                    )
+                )
+                if sim_veri_kaynagi.get("url"):
+                    st.caption("Bağlantı: %s" % sim_veri_kaynagi["url"])
+        if sim_siralama.get("yil_tahminleri"):
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Yıl": sim_yil_satiri["yil"],
+                            "Tahmini sıra": sim_sira_metni(
+                                sim_yil_satiri["sira"]
+                            ),
+                        }
+                        for sim_yil_satiri in sim_siralama["yil_tahminleri"]
+                    ]
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+    else:
+        st.info(
+            SIM_SIRALAMA_NOTLARI.get(
+                sim_siralama["durum"], SIM_SIRALAMA_NOTLARI["veri_yok"]
+            ),
+            icon="ℹ️",
+        )
+        for sim_eksik in sim_siralama.get("eksik_veri") or []:
+            st.caption("• Eksik: %s" % sim_eksik)
+        sim_kapsanan_yillar = sim_siralama.get("kapsanan_yillar") or []
+        st.caption(
+            "Bu puan türü için referans verisi olan yıllar: %s"
+            % (", ".join(sim_kapsanan_yillar) if sim_kapsanan_yillar else "yok")
+        )
+        st.caption(
+            "Referans verisi eklendiğinde (yönetici: bu sekmenin altındaki"
+            " bölüm) sıralama tahmini otomatik görünür."
+        )
+
+    st.divider()
+    st.subheader("🎯 Hedef netlerimle karşılaştırma")
+    st.caption(
+        "Hedef netler ayrı saklanır; mevcut deneme netlerinizin üzerine"
+        " yazılmaz. Fark = mevcut − hedef (negatifse hedefin altındasınız)."
+    )
+    sim_hedef_satirlar = ranking_engine.hedef_karsilastirma(
+        current_user["id"], sim_puan_turu, sim_mevcut
+    )
+    sim_hedef_var = [s for s in sim_hedef_satirlar if s["hedef"] is not None]
+    sim_mevcut_var = [s for s in sim_hedef_satirlar if s["mevcut"] is not None]
+    if not sim_hedef_var and not sim_mevcut_var:
+        st.info(
+            "Ne kayıtlı hedef netiniz ne de ders bazlı deneme netiniz var."
+            " Aşağıdaki formdan hedef netlerinizi girebilirsiniz.",
+            icon="ℹ️",
+        )
+    else:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Test": sim_satir["test"],
+                        "Mevcut net": (
+                            "%.2f" % sim_satir["mevcut"]
+                            if sim_satir["mevcut"] is not None
+                            else "—"
+                        ),
+                        "Hedef net": (
+                            "%.2f" % sim_satir["hedef"]
+                            if sim_satir["hedef"] is not None
+                            else "—"
+                        ),
+                        "Fark": (
+                            "%+.2f" % sim_satir["fark"]
+                            if sim_satir["fark"] is not None
+                            else "—"
+                        ),
+                        "Durum": SIM_DURUM_ETIKETLERI.get(
+                            sim_satir["durum"], sim_satir["durum"]
+                        ),
+                    }
+                    for sim_satir in sim_hedef_satirlar
+                ]
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    sim_gereken_testler = ranking_engine.gereken_testler(sim_puan_turu)
+    sim_eksik_hedefler = [
+        sim_test for sim_test in sim_gereken_testler if sim_test not in sim_hedefler
+    ]
+    if sim_hedef_var:
+        if sim_eksik_hedefler:
+            st.caption(
+                "Hedef puan karşılığı için eksik hedef netler: %s"
+                % ", ".join(sim_eksik_hedefler)
+            )
+        else:
+            sim_hedef_puan = ranking_engine.puan_hesapla(
+                sim_hedefler,
+                sim_puan_turu,
+                sim_yil,
+                sim_diploma,
+                sim_obp_dahil,
+            )
+            if sim_hedef_puan["durum"] == ranking_engine.DURUM_OK:
+                sim_h1, sim_h2 = st.columns(2)
+                with sim_h1:
+                    st.metric(
+                        "Hedef netlerin model puanı",
+                        "%.2f" % sim_hedef_puan["puan"],
+                    )
+                with sim_h2:
+                    if sim_puan is not None:
+                        st.metric(
+                            "Mevcuttan fark",
+                            "%+.2f puan"
+                            % (sim_hedef_puan["puan"] - sim_puan["puan"]),
+                        )
+                    else:
+                        st.metric("Mevcuttan fark", "—")
+
+    with st.form("sim_hedef_formu"):
+        st.markdown("**Hedef netleri kaydet / güncelle**")
+        st.caption(
+            "Sıfır girilen testler hedef olarak saklanmaz. Hedef netler yalnızca"
+            " karşılaştırma ve hedef puan hesabı için kullanılır."
+        )
+        sim_hedef_girdiler = {}
+        sim_hedef_kolonlari = st.columns(2)
+        for sim_indeks, sim_test in enumerate(sim_gereken_testler):
+            sim_soru_sayisi = osym_verisi.test_soru_sayisi(sim_test) or 40
+            sim_hedef_anahtari = "sim_hedef_%s_%s" % (
+                sanitize_key(sim_puan_turu),
+                sanitize_key(sim_test),
+            )
+            if sim_hedef_anahtari not in st.session_state:
+                st.session_state[sim_hedef_anahtari] = float(
+                    sim_hedefler.get(sim_test, 0.0)
+                )
+            with sim_hedef_kolonlari[sim_indeks % 2]:
+                sim_hedef_girdiler[sim_test] = st.number_input(
+                    "%s hedefi (0–%d)" % (sim_test, sim_soru_sayisi),
+                    min_value=0.0,
+                    max_value=float(sim_soru_sayisi),
+                    step=0.25,
+                    key=sim_hedef_anahtari,
+                )
+        if st.form_submit_button("💾 Hedef netleri kaydet"):
+            sim_kayit_netler = {
+                test: net
+                for test, net in sim_hedef_girdiler.items()
+                if net and net > 0
+            }
+            try:
+                if sim_kayit_netler:
+                    ranking_engine.hedef_netleri_kaydet(
+                        current_user["id"], sim_puan_turu, sim_kayit_netler
+                    )
+                else:
+                    ranking_engine.hedef_netleri_sil(
+                        current_user["id"], sim_puan_turu
+                    )
+            except ranking_engine.SimulatorHatasi as sim_hedef_hata:
+                st.error("Hedef netler kaydedilemedi: %s" % sim_hedef_hata)
+            else:
+                log_islem(
+                    current_user["id"],
+                    "SAVE_TARGET_NETS",
+                    "%s: %d test" % (sim_puan_turu, len(sim_kayit_netler)),
+                )
+                set_flash_message(
+                    "success",
+                    "%s için hedef netler kaydedildi (%d test)."
+                    % (sim_puan_turu, len(sim_kayit_netler)),
+                )
+                st.rerun()
+
+    if sim_hedefler:
+        if st.button("🗑️ Hedef netleri temizle", key="sim_hedef_temizle"):
+            ranking_engine.hedef_netleri_sil(current_user["id"], sim_puan_turu)
+            for sim_test in sim_gereken_testler:
+                st.session_state.pop(
+                    "sim_hedef_%s_%s"
+                    % (sanitize_key(sim_puan_turu), sanitize_key(sim_test)),
+                    None,
+                )
+            log_islem(
+                current_user["id"], "CLEAR_TARGET_NETS", str(sim_puan_turu)
+            )
+            set_flash_message(
+                "info", "%s hedef netleri temizlendi." % sim_puan_turu
+            )
+            st.rerun()
+
+    st.divider()
+    st.subheader("📅 Yıllara göre karşılaştırma")
+    st.caption(
+        "Aynı netlerle her yılın kural setine göre model puanı hesaplanır."
+        " Sıralama yalnızca o yıl için doğrulanmış referans verisi varsa görünür."
+    )
+    sim_yil_satirlari = ranking_engine.yil_karsilastirmasi(
+        sim_netler,
+        sim_puan_turu,
+        sim_diploma,
+        sim_obp_dahil,
+        yillar=list(reversed(osym_verisi.desteklenen_yillar())),
+    )
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Yıl": sim_satir["yil"],
+                    "Model puanı": (
+                        "%.2f" % sim_satir["puan"]
+                        if sim_satir["puan"] is not None
+                        else "—"
+                    ),
+                    "Tahmini sıra": (
+                        sim_sira_metni(sim_satir["sira"])
+                        if sim_satir["sira"] is not None
+                        else "veri yok"
+                    ),
+                    "Senaryo aralığı": (
+                        "%s – %s"
+                        % (
+                            sim_sira_metni(sim_satir["aralik"][0]),
+                            sim_sira_metni(sim_satir["aralik"][1]),
+                        )
+                        if sim_satir["aralik"]
+                        else "—"
+                    ),
+                }
+                for sim_satir in sim_yil_satirlari
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.caption(
+        "Bu ekran bir ÖSYM sonucu açıklama sistemi değildir. Gerçek sıralama;"
+        " sınavın zorluğu, adayların performansı ve ilgili yılın koşullarına"
+        " göre değişebilir. Sıralama tahmini yalnızca girilen referans"
+        " verisiyle sınırlıdır."
+    )
+
+    if current_user["rol"] == "admin":
+        with st.expander("🛠️ Puan–sıra referans verisi (yönetici)"):
+            st.caption(
+                "Sıralama tahmini bu dosyadan beslenir: `%s`. Kaynaksız kayıt"
+                " kabul edilmez; noktalar puan azalan / sıra artan olmalıdır."
+                % sim_siralama_ozet.get("dosya", osym_verisi.veri_dosyasi())
+            )
+            if sim_siralama_ozet.get("hata"):
+                st.error(sim_siralama_ozet["hata"])
+            st.caption(
+                "Kayıt: %d · Hatalı kayıt: %d · Son güncelleme: %s"
+                % (
+                    sim_siralama_ozet.get("kayit_sayisi") or 0,
+                    sim_siralama_ozet.get("hatali_kayit_sayisi") or 0,
+                    sim_siralama_ozet.get("guncelleme") or "—",
+                )
+            )
+            sim_kaynak_tablosu = sim_siralama_ozet.get("kaynaklar") or []
+            if sim_kaynak_tablosu:
+                st.dataframe(
+                    pd.DataFrame(sim_kaynak_tablosu),
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.info(
+                    "Kayıtlı referans verisi yok. Aşağıdaki formdan resmî"
+                    " kaynağa dayanan noktaları ekleyebilirsiniz."
+                )
+
+            with st.form("sim_veri_ekle_formu"):
+                st.markdown("**Referans kaydı ekle / güncelle**")
+                sim_veri_kol1, sim_veri_kol2 = st.columns(2)
+                with sim_veri_kol1:
+                    sim_veri_yil = st.selectbox(
+                        "Sınav yılı",
+                        list(reversed(osym_verisi.desteklenen_yillar())),
+                        key="sim_veri_yil",
+                    )
+                    sim_veri_kurum = st.text_input(
+                        "Kaynak kurum", value="", key="sim_veri_kurum"
+                    )
+                    sim_veri_url = st.text_input(
+                        "Kaynak bağlantısı (URL)", value="", key="sim_veri_url"
+                    )
+                with sim_veri_kol2:
+                    sim_veri_tur = st.selectbox(
+                        "Puan türü",
+                        list(osym_verisi.PUAN_TURLERI),
+                        key="sim_veri_tur",
+                    )
+                    sim_veri_belge = st.text_input(
+                        "Kaynak belge / tablo adı",
+                        value="",
+                        key="sim_veri_belge",
+                    )
+                    sim_veri_erisim = st.text_input(
+                        "Erişim tarihi (YYYY-AA-GG)",
+                        value="",
+                        placeholder="2026-11-11",
+                        key="sim_veri_erisim",
+                    )
+                sim_veri_noktalar = st.text_area(
+                    "Noktalar (her satır: puan;sıra)",
+                    value="",
+                    height=120,
+                    placeholder="500;500\n450;6000\n400;30000",
+                    key="sim_veri_noktalar",
+                )
+                sim_veri_not = st.text_input(
+                    "Not (kapsam / sınırlılık)", value="", key="sim_veri_not"
+                )
+                if st.form_submit_button("💾 Referans kaydını yaz"):
+                    try:
+                        osym_verisi.kayit_ekle(
+                            sim_veri_yil,
+                            sim_veri_tur,
+                            sim_noktalari_oku(sim_veri_noktalar),
+                            {
+                                "kurum": sim_veri_kurum,
+                                "belge": sim_veri_belge,
+                                "url": sim_veri_url,
+                                "erisim_tarihi": sim_veri_erisim or None,
+                            },
+                            not_metni=sim_veri_not,
+                        )
+                    except (ValueError, osym_verisi.VeriHatasi) as sim_veri_hata:
+                        st.error("Kayıt yazılamadı: %s" % sim_veri_hata)
+                    else:
+                        log_islem(
+                            current_user["id"],
+                            "SAVE_RANK_DATA",
+                            "%s / %s" % (sim_veri_yil, sim_veri_tur),
+                        )
+                        set_flash_message(
+                            "success",
+                            "Referans kaydı yazıldı (%s / %s)."
+                            % (sim_veri_yil, sim_veri_tur),
+                        )
+                        st.rerun()
+
+            if sim_kaynak_tablosu:
+                with st.form("sim_veri_sil_formu"):
+                    st.markdown("**Referans kaydı sil**")
+                    sim_sil_secenekleri = [
+                        "%s / %s" % (kayit["yil"], kayit["puan_turu"])
+                        for kayit in sim_kaynak_tablosu
+                    ]
+                    sim_sil_secim = st.selectbox(
+                        "Silinecek kayıt",
+                        sim_sil_secenekleri,
+                        key="sim_sil_secim",
+                    )
+                    if st.form_submit_button("🗑️ Seçili kaydı sil"):
+                        sim_sil_yil, sim_sil_tur = sim_sil_secim.split(" / ")
+                        osym_verisi.kayit_sil(sim_sil_yil, sim_sil_tur)
+                        log_islem(
+                            current_user["id"],
+                            "DELETE_RANK_DATA",
+                            sim_sil_secim,
+                        )
+                        set_flash_message(
+                            "info",
+                            "Referans kaydı silindi: %s" % sim_sil_secim,
+                        )
+                        st.rerun()
+
+
+
+
+
+
+
+
+
 
