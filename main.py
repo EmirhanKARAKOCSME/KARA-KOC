@@ -3959,6 +3959,11 @@ def init_alt_konu_db():
         kolonlar = [r[1] for r in cur.fetchall()]
         if "alt_konu" not in kolonlar:
             cur.execute("ALTER TABLE calisma_programi_gorevler ADD COLUMN alt_konu TEXT")
+        # FAZ 5D: mikro konunun tam soru hedefi (görev bu hedefin parçası olabilir).
+        if "mikro_hedef_soru" not in kolonlar:
+            cur.execute(
+                "ALTER TABLE calisma_programi_gorevler ADD COLUMN mikro_hedef_soru INTEGER"
+            )
         conn.commit()
 
 
@@ -3977,7 +3982,13 @@ def alt_konu_haritasi_denetle(aktif_mufredat):
 
 
 def alt_durumlari_yukle(ogrenci_id):
-    """Tamamlanmış alt başlıklar: {(ders, mikro, alt)}. Eski toplu işaretlemeler de dahil."""
+    """Tamamlanmış alt başlıklar: {(ders, mikro, alt)}.
+
+    FAZ 5D: mikro konu, GÜNLÜK GÖREV tamamlanmasıyla değil, gerçek ilerleme
+    kaydıyla (`task_steps.mikro_konu_ilerleme`) kapanır. Bu yüzden manuel/eski
+    işaretlemelerin yanına otomatik tamamlanan mikro konular da eklenir; böylece
+    tamamlanmış mikro konu yeniden planlanmaz.
+    """
     try:
         with get_connection() as c:
             df_a = pd.read_sql_query(
@@ -3997,6 +4008,10 @@ def alt_durumlari_yukle(ogrenci_id):
         if (d, m) not in satirli:  # eski/toplu işaretleme: hepsi tamam sayılır
             for a in MIKRO_ALT_KONULAR.get(m, []):
                 sonuc.add((d, m, a))
+    try:  # FAZ 5D: gerçek ilerlemeden kapanan mikro konular
+        sonuc.update(task_steps.mikro_tamamlananlar(ogrenci_id))
+    except Exception:
+        pass
     return sonuc
 
 
@@ -4136,7 +4151,14 @@ def alt_konu_arayuzu_ciz(ders_adi, makro_adi, mikro_ad, alt_set):
 
 
 def gorev_alt_konu_isle(gorev_id, tamamlandi):
-    """Alt başlık içeren görev işaretlenince ilgili alt başlıkları otomatik işaretler/geri alır."""
+    """Görev işaretlenince mikro konu ilerlemesini tazeler (FAZ 5D).
+
+    GÜNLÜK GÖREV tamamlanması mikro konuyu KAPATMAZ. Mikro konu yalnızca
+    öğrenme adımları bitip gerçek soru hedefi dolunca kapanır; bu durum
+    `task_steps.mikro_ilerleme_guncelle` tarafından gerçek adım/oturumlardan
+    türetilir. Burada eski alt başlık işaretleri korunur (geri alınmaz),
+    yalnızca mikro konuya ait oturum/widget durumu tazelenir.
+    """
     try:
         with get_connection() as c:
             cur = c.cursor()
@@ -4149,8 +4171,10 @@ def gorev_alt_konu_isle(gorev_id, tamamlandi):
         if not r or not r[4]:
             return
         oid, ders, makro, mikro, alt_str = r
-        for a in [x.strip() for x in alt_str.split("||") if x.strip()]:
-            alt_konu_isaretle(oid, ders, makro, mikro, a, bool(tamamlandi))
+        try:
+            task_steps.mikro_ilerleme_guncelle(gorev_id)
+        except Exception:
+            pass
         alt_oturum_temizle(ders, makro, mikro)
     except Exception:
         pass
@@ -4514,6 +4538,7 @@ def _gorevleri_zenginlestir(gorevler, ogrenci_id):
         MIKRO_ALT_KONULAR,
         KONU_SURELERI_DK,
         tamamlanan_altlar=tamamlanan_altlar,
+        ogrenci_id=ogrenci_id,
     ):
         alt_sayisi = 1
         alt = gorev.get("alt_konu")

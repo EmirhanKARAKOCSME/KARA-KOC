@@ -141,6 +141,7 @@ def gorev_ozeti(gorev):
         "mikro_konu": gorev.get("mikro_konu"),
         "alt_konu": gorev.get("alt_konu"),
         "hedef_soru": int(gorev.get("hedef_soru") or 0),
+        "mikro_hedef_soru": int(gorev.get("mikro_hedef_soru") or 0),
         "tahmini_sure_dk": int(gorev.get("tahmini_sure_dk") or 0),
         "pedagoji_turu": gorev.get("pedagoji_turu"),
         "gorev_turu": gorev.get("gorev_turu"),

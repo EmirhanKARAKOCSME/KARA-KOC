@@ -321,10 +321,14 @@ class MikroGorevTestleri(unittest.TestCase):
 
         self.assertEqual(anlatim[alts[0]], 60)
         self.assertEqual(anlatim[alts[2]], 90)
-        # Ana konunun süresi mikro konu sayısına BÖLÜNMEZ (80/5 = 16 değil).
+        # Tanımlı süresi olmayan mikro konular TEK süre kaynağından
+        # (`task_steps`) makul varsayılanı alır: ana konunun süresi ne
+        # BÖLÜNÜR (80/5 = 16) ne de her mikro konuya KOPYALANIR (80).
+        ana_sure = int(konu_sureleri[V.POLINOM_ANA_KONU])
         for alt in (alts[1], alts[3], alts[4]):
-            self.assertEqual(anlatim[alt], 80)
-            self.assertNotEqual(anlatim[alt], 16)
+            self.assertEqual(anlatim[alt], task_steps.VARSAYILAN_KONU_SURESI_DK)
+            self.assertNotEqual(anlatim[alt], ana_sure // len(alts))
+            self.assertNotEqual(anlatim[alt], ana_sure)
         # Görev süreleri mikro konuya göre farklılaşır.
         self.assertGreater(len({g["tahmini_sure_dk"] for g in gorevler}), 1)
 
@@ -482,10 +486,16 @@ class MikroGorevTestleri(unittest.TestCase):
         )
         self.assertEqual([p["alt_konu"] for p in parcalar], alts)
         self.assertEqual(sum(p["hedef_soru"] for p in parcalar), 25)
+        # FAZ 5D: süre MİKRO KONU bazındadır; fallback motoru da aynı TEK
+        # kaynağı (`task_steps`) kullanır (ana konu süresi bölünmez/kopyalanmaz).
+        beklenen_sureler = [
+            task_steps.mikro_anlatim_suresi(
+                None, "AYT Matematik", V.POLINOM_ANA_KONU, alt, konu_sureleri
+            )
+            for alt in alts
+        ]
         self.assertEqual(
-            sum(p["konu_suresi_dk"] for p in parcalar),
-            int(konu_sureleri[V.POLINOM_ANA_KONU]),
-            "Fallback bölmesi kaynak görevin planlanan süresini korur",
+            [p["konu_suresi_dk"] for p in parcalar], beklenen_sureler
         )
 
         # Idempotent: bölünmüş görevler yeniden bölünmez.
@@ -585,6 +595,212 @@ class MikroGorevTestleri(unittest.TestCase):
         for gorev in yazilan:
             self.assertEqual(gorev["mikro_konu"], V.POLINOM_ANA_KONU)
             self.assertIsNotNone(gorev["tahmini_sure_dk"])
+
+
+    # ------------------------------------------------------------------
+    # 13 - GÜNLÜK GÖREV KAPANINCA MİKRO KONU KAPANMAZ
+    # ------------------------------------------------------------------
+    def test_13_gunluk_gorev_mikro_konuyu_kapatmaz(self):
+        alts = self.mikro_alt[V.POLINOM_ANA_KONU]
+        hedefler = planner.mikro_soru_paylari(self._ana_hedef(), alts)
+        program = self._programa_yaz(
+            [g for g in self._plan()["gorevler"]
+             if g["mikro_konu"] == V.POLINOM_ANA_KONU]
+        )
+        yazilan = {
+            g["alt_konu"]: g for g in programs.program_gorevleri(program["id"])
+        }
+
+        # FAZ 5D: mikro konunun TAM soru hedefi programda saklanır.
+        self.assertEqual(set(yazilan), set(alts))
+        for alt, gorev in yazilan.items():
+            self.assertEqual(int(gorev["mikro_hedef_soru"]), hedefler[alt])
+            self.assertGreater(int(gorev["mikro_hedef_soru"]), 0)
+
+        alt = alts[0]
+        gorev_id = int(yazilan[alt]["id"])
+        hedef = hedefler[alt]
+        anahtar = ("AYT Matematik", V.POLINOM_ANA_KONU, alt)
+
+        # Öğrenme adımları bitti + 3 soru çözüldü: mikro konu HÂLÂ AÇIK.
+        for adim in task_steps.gorev_adimlari(gorev_id):
+            if adim["adim_turu"] in task_steps.TURETILEN_ADIMLAR:
+                continue
+            task_steps.adim_durum_degistir(adim["id"], True)
+        self._oturum(gorev_id, 3, alt=alt)
+        ilerleme = task_steps.mikro_ilerleme_guncelle(gorev_id)
+        self.assertTrue(ilerleme["ogrenme_tamam"])
+        self.assertEqual(ilerleme["hedef_soru"], hedef)
+        self.assertEqual(ilerleme["cozulen_soru"], 3)
+        self.assertEqual(ilerleme["kalan_soru"], hedef - 3)
+        self.assertFalse(ilerleme["tamamlandi"])
+        self.assertNotIn(anahtar, task_steps.mikro_tamamlananlar(self.ogrenci))
+
+        # Günlük görev TAMAMLANDI işaretlense bile mikro konu KAPANMAZ:
+        # ilerleme yalnızca gerçek adım/oturumlardan türetilir.
+        self.conn.execute(
+            "UPDATE calisma_programi_gorevler SET durum = 1 WHERE id = ?",
+            (gorev_id,),
+        )
+        self.conn.commit()
+        task_steps.mikro_ilerleme_guncelle(gorev_id)
+        ilerleme = task_steps.mikro_ilerleme(
+            self.ogrenci, "AYT Matematik", V.POLINOM_ANA_KONU, alt
+        )
+        self.assertFalse(
+            ilerleme["tamamlandi"], "Günlük görev durumu mikro konuyu kapatmaz"
+        )
+        self.assertEqual(ilerleme["cozulen_soru"], 3)
+        self.assertEqual(ilerleme["kalan_soru"], hedef - 3)
+        self.assertNotIn(anahtar, task_steps.mikro_tamamlananlar(self.ogrenci))
+
+        # Kalan sorular GERÇEKTEN çözülünce mikro konu kapanır.
+        self._oturum(gorev_id, hedef - 3, alt=alt)
+        ilerleme = task_steps.mikro_ilerleme_guncelle(gorev_id)
+        self.assertTrue(ilerleme["tamamlandi"])
+        self.assertEqual(ilerleme["kalan_soru"], 0)
+        self.assertEqual(
+            task_steps.mikro_tamamlananlar(self.ogrenci), {anahtar},
+            "Yalnızca hedefi dolan mikro konu kapanır",
+        )
+
+    # ------------------------------------------------------------------
+    # 14 - DEVİR GÖREVİ YALNIZCA SORU TAŞIR
+    # ------------------------------------------------------------------
+    def test_14_devir_sadece_soru_tasir(self):
+        alts = self.mikro_alt[V.POLINOM_ANA_KONU]
+        # Geçen programdan 12 soru kalan mikro konu yeni haftaya devredilir.
+        onceki = [{
+            "id": 9001,
+            "ders": "AYT Matematik",
+            "makro_konu": V.POLINOM_MAKRO,
+            "mikro_konu": V.POLINOM_ANA_KONU,
+            "alt_konu": alts[0],
+            "gorev_tanimi": "%s ➔ %s" % (V.POLINOM_ANA_KONU, alts[0]),
+            "hedef_soru": 12,
+            "mikro_hedef_soru": 12,
+            "gercek_soru": 0,
+            "devredilen_soru": 0,
+            "durum": 0,
+            "pedagoji_turu": "Pekiştirme",
+            "tarih": "2026-11-09",
+        }]
+        sonuc = self._plan(onceki_gorevler=onceki)
+        devir = [
+            g for g in sonuc["gorevler"]
+            if g["mikro_konu"] == V.POLINOM_ANA_KONU and g["alt_konu"] == alts[0]
+        ]
+        self.assertTrue(devir, "Kalan sorular devreden görev olarak planlanmalı")
+        self.assertEqual(
+            sum(g["hedef_soru"] for g in devir), 12,
+            "Devredilen soruların TAMAMI planlanır",
+        )
+        for gorev in devir:
+            # DEVAM görevi videoyu/notu yeniden istemez; yalnızca soru içerir.
+            turler = [a["adim_turu"] for a in gorev["adimlar"]]
+            self.assertEqual(set(turler), {task_steps.ADIM_SORU})
+            self.assertEqual(
+                sum(a["hedef_soru"] for a in gorev["adimlar"]),
+                int(gorev["hedef_soru"]),
+                "Soru blokları devredilen soru sayısına eşit olmalı",
+            )
+            self.assertEqual(int(gorev["mikro_hedef_soru"]), 12)
+            self.assertEqual(int(gorev["kaynak_gorev_id"]), 9001)
+
+        # Diğer mikro konular normal (anlatım + not + soru) planlanır.
+        for gorev in sonuc["gorevler"]:
+            if gorev["mikro_konu"] != V.POLINOM_ANA_KONU:
+                continue
+            if gorev["alt_konu"] == alts[0]:
+                continue
+            turler = [a["adim_turu"] for a in gorev["adimlar"]]
+            self.assertIn(task_steps.ADIM_IZLE, turler)
+            self.assertIn(task_steps.ADIM_NOT, turler)
+
+
+    # ------------------------------------------------------------------
+    # 15 - FAZ 6A: HER MİKRO KONU KENDİ TEKRARINI ÜRETİR
+    # ------------------------------------------------------------------
+    def test_15_tekrarlar_mikro_konuya_bagli(self):
+        alts = self.mikro_alt[V.POLINOM_ANA_KONU]
+        gorevler = {g["alt_konu"]: g for g in self._polinom()}
+        program = self._programa_yaz(
+            [g for g in self._plan()["gorevler"]
+             if g["mikro_konu"] == V.POLINOM_ANA_KONU]
+        )
+
+        # Aynı ana konunun iki farklı mikro konusu tamamlanır.
+        for alt in alts[:2]:
+            gorev_id = self._gorev_id(program, alt)
+            for adim in task_steps.gorev_adimlari(gorev_id):
+                if adim["adim_turu"] in task_steps.TURETILEN_ADIMLAR:
+                    continue
+                task_steps.adim_durum_degistir(adim["id"], True)
+            self._oturum(gorev_id, gorevler[alt]["hedef_soru"], alt=alt)
+            task_steps.gorev_durum_guncelle(gorev_id)
+
+        kayitlar = [
+            k for k in sr.tekrar_listesi(self.ogrenci)
+            if k["mikro_konu"] == V.POLINOM_ANA_KONU
+        ]
+        self.assertEqual(
+            sorted(k["alt_konu"] for k in kayitlar), sorted(alts[:2]),
+            "Her mikro konu KENDİ tekrar kaydını üretir",
+        )
+        for kayit in kayitlar:
+            self.assertEqual(kayit["tekrar_turu"], sr.TEKRAR_TURU_3_GUN)
+            self.assertEqual(kayit["planlanan_tarih"], "2026-11-12")
+            self.assertIn(kayit["alt_konu"], kayit["aciklama"])
+
+        # Ezber görevi: 3 günlük tekrar + 5 günlük özet notu, ikisi de mikro
+        # konuya bağlı ve birbirini engellemez.
+        ezber = {
+            "ders": "TYT Tarih",
+            "makro_konu": "İnkılap Tarihi",
+            "mikro_konu": "Atatürk İlkeleri",
+            "alt_konu": "İlkelerin Açıklanması",
+            "gorev_tanimi": "📌 Atatürk İlkeleri ➔ İlkelerin Açıklanması",
+            "hedef_soru": 10,
+            "mikro_hedef_soru": 10,
+            "pedagoji_turu": sr.EZBER_PEDAGOJISI,
+            "tarih": "2026-11-09",
+            "adimlar": [
+                {"adim_turu": task_steps.ADIM_IZLE,
+                 "baslik": "Konu anlatımını izle"},
+                {"adim_turu": task_steps.ADIM_NOT,
+                 "baslik": "Kısa özet notu çıkar"},
+                {"adim_turu": task_steps.ADIM_SORU,
+                 "baslik": "10 soru çöz", "hedef_soru": 10},
+            ],
+        }
+        ezber_program = self._programa_yaz([ezber])
+        ezber_id = self._gorev_id(ezber_program, ezber["alt_konu"])
+        for adim in task_steps.gorev_adimlari(ezber_id):
+            if adim["adim_turu"] in task_steps.TURETILEN_ADIMLAR:
+                continue
+            task_steps.adim_durum_degistir(adim["id"], True)
+        self._oturum(
+            ezber_id, 10, ders="TYT Tarih", makro="İnkılap Tarihi",
+            mikro="Atatürk İlkeleri", alt=ezber["alt_konu"],
+        )
+        task_steps.gorev_durum_guncelle(ezber_id)
+
+        ezber_kayitlar = [
+            k for k in sr.tekrar_listesi(self.ogrenci)
+            if k["mikro_konu"] == "Atatürk İlkeleri"
+        ]
+        self.assertEqual(
+            sorted(k["tekrar_turu"] for k in ezber_kayitlar),
+            sorted([sr.TEKRAR_TURU_3_GUN, sr.TEKRAR_TURU_5_GUN_NOT]),
+            "Ezber görevi hem 3 hem 5 günlük tekrar üretir",
+        )
+        self.assertEqual(
+            {k["planlanan_tarih"] for k in ezber_kayitlar},
+            {"2026-11-12", "2026-11-14"},
+        )
+        for kayit in ezber_kayitlar:
+            self.assertEqual(kayit["alt_konu"], ezber["alt_konu"])
+            self.assertEqual(kayit["aciklama"].count(ezber["alt_konu"]), 1)
 
 
 if __name__ == "__main__":

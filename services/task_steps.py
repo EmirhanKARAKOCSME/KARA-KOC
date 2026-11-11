@@ -174,6 +174,37 @@ _INDEKSLER = (
     " ON calisma_gorev_alt_adimlari(gorev_id, durum)",
 )
 
+# FAZ 5D: GÜNLÜK GÖREV tamamlanmasından BAĞIMSIZ mikro konu ilerlemesi.
+# Bir mikro konu (alt başlık) yalnızca öğrenme adımları bitip GERÇEK çözülen
+# soru sayısı mikro konunun tam hedefine ulaştığında tamamlanır. Günlük görevin
+# kapanması bu kaydı kapatmaz; kalan sorular sonraki plana devreder.
+_SEMA_MIKRO_ILERLEME = """
+CREATE TABLE IF NOT EXISTS mikro_konu_ilerleme (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ogrenci_id INTEGER NOT NULL,
+    ders TEXT NOT NULL,
+    makro_konu TEXT,
+    mikro_konu TEXT NOT NULL,
+    alt_konu TEXT NOT NULL,
+    ogrenme_tamam INTEGER NOT NULL DEFAULT 0,
+    hedef_soru INTEGER NOT NULL DEFAULT 0,
+    cozulen_soru INTEGER NOT NULL DEFAULT 0,
+    tamamlandi INTEGER NOT NULL DEFAULT 0,
+    son_gorev_id INTEGER,
+    olusturma_zamani TEXT,
+    guncelleme_zamani TEXT,
+    UNIQUE(ogrenci_id, ders, mikro_konu, alt_konu),
+    FOREIGN KEY(ogrenci_id) REFERENCES ogrenciler(id) ON DELETE CASCADE
+)
+"""
+
+_INDEKSLER_MIKRO_ILERLEME = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_mikro_ilerleme_tek"
+    " ON mikro_konu_ilerleme(ogrenci_id, ders, mikro_konu, alt_konu)",
+    "CREATE INDEX IF NOT EXISTS idx_mikro_ilerleme_durum"
+    " ON mikro_konu_ilerleme(ogrenci_id, tamamlandi)",
+)
+
 
 # ==============================================================================
 # SORU BLOKLARI
@@ -334,6 +365,9 @@ def init_db():
             conn.execute(_SEMA)
             for sorgu in _INDEKSLER:
                 conn.execute(sorgu)
+            conn.execute(_SEMA_MIKRO_ILERLEME)
+            for sorgu in _INDEKSLER_MIKRO_ILERLEME:
+                conn.execute(sorgu)
     return True
 
 
@@ -461,6 +495,12 @@ def gorev_durum_guncelle(gorev_id, an=None):
     geçmişte tamamlanmış görevler mükerrer/geriye dönük tekrar üretmez.
     """
     tamam = gorev_tamam_mi(gorev_id)
+    # FAZ 5D: mikro konu ilerlemesi günlük görev durumundan BAĞIMSIZDIR; her
+    # kayıtta gerçek adım/oturumlardan tazelenir (eski görevlerde de çalışır).
+    try:
+        mikro_ilerleme_guncelle(gorev_id, an=an)
+    except Exception:  # pragma: no cover - ilerleme hatası görevi bozmaz
+        pass
     if tamam is None:
         return None
     try:
@@ -499,6 +539,248 @@ def gorev_ilerleme(gorev_id):
 
 
 # ==============================================================================
+# FAZ 5D: MİKRO KONU İLERLEMESİ (günlük görevden BAĞIMSIZ)
+# ==============================================================================
+def _kolon_var_mi(conn, tablo, kolon):
+    """Tabloda kolon var mı (eski şemalarla uyum için)."""
+    try:
+        return kolon in [satir[1] for satir in conn.execute("PRAGMA table_info(%s)" % tablo)]
+    except sqlite3.Error:  # pragma: no cover - tablo yoksa
+        return False
+
+
+def _mikro_gorev_satiri(conn, gorev_id):
+    """Görevin mikro konu kimliği + hedefleri (alt konu yoksa None)."""
+    try:
+        gid = int(gorev_id)
+    except (TypeError, ValueError):
+        return None
+    mikro_hedef = (
+        "mikro_hedef_soru"
+        if _kolon_var_mi(conn, "calisma_programi_gorevler", "mikro_hedef_soru")
+        else "NULL"
+    )
+    satir = conn.execute(
+        "SELECT id, ogrenci_id, ders, makro_konu, mikro_konu, alt_konu,"
+        " hedef_soru, %s AS mikro_hedef_soru"
+        " FROM calisma_programi_gorevler WHERE id = ?" % mikro_hedef,
+        (gid,),
+    ).fetchone()
+    if satir is None:
+        return None
+    ders = _metin(satir["ders"])
+    mikro = _metin(satir["mikro_konu"])
+    alt = _metin(satir["alt_konu"])
+    if not (ders and mikro and alt):
+        return None
+    return {
+        "id": int(satir["id"]),
+        "ogrenci_id": satir["ogrenci_id"],
+        "ders": ders,
+        "makro_konu": _metin(satir["makro_konu"]),
+        "mikro_konu": mikro,
+        "alt_konu": alt,
+        "hedef_soru": int(satir["hedef_soru"] or 0),
+        "mikro_hedef_soru": int(satir["mikro_hedef_soru"] or 0),
+    }
+
+
+def _mikro_gercek_durum(conn, gorev):
+    """Aynı mikro konunun (alt başlığın) GERÇEK toplamları.
+
+    Dönüş: (öğrenme adımı sayısı, biten adım sayısı, çözülen soru, hedef soru)
+
+    - Adımlar ve oturumlar mikro konunun TÜM görevlerinden toplanır; böylece
+      haftaya bölünen (10 + 10) bir mikro konu ancak toplam hedef dolunca
+      tamamlanır.
+    - Hedef, görevlerin en büyük mikro hedefidir (planlanan parça değil).
+    """
+    params = (gorev["ogrenci_id"], gorev["ders"], gorev["mikro_konu"], gorev["alt_konu"])
+    adim_satirlari = conn.execute(
+        "SELECT COALESCE(a.durum, 0) AS durum FROM calisma_gorev_alt_adimlari a"
+        " JOIN calisma_programi_gorevler g ON g.id = a.gorev_id"
+        " WHERE g.ogrenci_id = ? AND g.ders = ? AND g.mikro_konu = ?"
+        " AND COALESCE(g.alt_konu, '') = ? AND a.adim_turu IN (?, ?, ?)",
+        params + (ADIM_IZLE, ADIM_NOT, ADIM_TEKRAR),
+    ).fetchall()
+    toplam_adim = len(adim_satirlari)
+    biten_adim = sum(1 for satir in adim_satirlari if int(satir["durum"] or 0))
+
+    mikro_hedef = (
+        "mikro_hedef_soru"
+        if _kolon_var_mi(conn, "calisma_programi_gorevler", "mikro_hedef_soru")
+        else "NULL"
+    )
+    gorevler = conn.execute(
+        "SELECT hedef_soru, %s AS mikro_hedef_soru FROM calisma_programi_gorevler"
+        " WHERE ogrenci_id = ? AND ders = ? AND mikro_konu = ?"
+        " AND COALESCE(alt_konu, '') = ?" % mikro_hedef,
+        params,
+    ).fetchall()
+    hedefler = []
+    for satir in gorevler:
+        try:
+            deger = int(satir["mikro_hedef_soru"] or 0)
+        except (TypeError, ValueError):
+            deger = 0
+        if deger <= 0:
+            deger = int(satir["hedef_soru"] or 0)
+        hedefler.append(max(0, deger))
+    hedef_soru = max(hedefler) if hedefler else 0
+
+    try:
+        cozulen = conn.execute(
+            "SELECT COALESCE(SUM(o.cozulen_soru), 0) AS soru"
+            " FROM calisma_oturumlari o"
+            " JOIN calisma_programi_gorevler g ON g.id = o.gorev_id"
+            " WHERE o.durum = ? AND g.ogrenci_id = ? AND g.ders = ?"
+            " AND g.mikro_konu = ? AND COALESCE(g.alt_konu, '') = ?",
+            ("Tamamlandı",) + params,
+        ).fetchone()
+        cozulen_soru = int(cozulen["soru"] or 0)
+    except sqlite3.Error:  # pragma: no cover - oturum tablosu yoksa
+        cozulen_soru = 0
+    return toplam_adim, biten_adim, max(0, cozulen_soru), hedef_soru
+
+
+def mikro_ilerleme_guncelle(gorev_id, an=None):
+    """Mikro konu ilerlemesini GERÇEK adım/oturumlardan yeniden türetir.
+
+    FAZ 5D kuralları:
+      - `ogrenme_tamam`: video/not/tekrar adımlarının tamamı bitti.
+      - `hedef_soru`: mikro konunun TAM hedefi (görevin parçası değil).
+      - `cozulen_soru`: mikro konunun tüm görevlerinde çözülen gerçek soru.
+      - `tamamlandi`: öğrenme bitti VE hedef soru (varsa) doldu.
+
+    Günlük görevin kapanması bu kaydı KAPATMAZ; kalan soru sonraki plana
+    devreder. Bu yüzden fonksiyon görev `durum` alanına hiç bakmaz.
+    """
+    with _baglanti() as conn:
+        with _islem(conn):
+            gorev = _mikro_gorev_satiri(conn, gorev_id)
+            if gorev is None:
+                return None
+            toplam_adim, biten_adim, cozulen, hedef = _mikro_gercek_durum(conn, gorev)
+            ogrenme_tamam = 1 if (toplam_adim > 0 and biten_adim >= toplam_adim) else 0
+            if hedef > 0:
+                tamam = 1 if (ogrenme_tamam and cozulen >= hedef) else 0
+            else:
+                tamam = ogrenme_tamam
+            zaman = _zaman_yaz(an or simdi())
+            anahtar = (
+                gorev["ogrenci_id"], gorev["ders"], gorev["mikro_konu"], gorev["alt_konu"],
+            )
+            mevcut = conn.execute(
+                "SELECT id FROM mikro_konu_ilerleme WHERE ogrenci_id = ? AND ders = ?"
+                " AND mikro_konu = ? AND alt_konu = ?",
+                anahtar,
+            ).fetchone()
+            if mevcut is None:
+                conn.execute(
+                    "INSERT INTO mikro_konu_ilerleme (ogrenci_id, ders, makro_konu,"
+                    " mikro_konu, alt_konu, ogrenme_tamam, hedef_soru, cozulen_soru,"
+                    " tamamlandi, son_gorev_id, olusturma_zamani, guncelleme_zamani)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        gorev["ogrenci_id"], gorev["ders"], gorev["makro_konu"],
+                        gorev["mikro_konu"], gorev["alt_konu"], ogrenme_tamam,
+                        hedef, cozulen, tamam, gorev["id"], zaman, zaman,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "UPDATE mikro_konu_ilerleme SET makro_konu = ?, ogrenme_tamam = ?,"
+                    " hedef_soru = ?, cozulen_soru = ?, tamamlandi = ?,"
+                    " son_gorev_id = ?, guncelleme_zamani = ? WHERE id = ?",
+                    (
+                        gorev["makro_konu"], ogrenme_tamam, hedef, cozulen, tamam,
+                        gorev["id"], zaman, int(mevcut["id"]),
+                    ),
+                )
+    return {
+        "ders": gorev["ders"],
+        "mikro_konu": gorev["mikro_konu"],
+        "alt_konu": gorev["alt_konu"],
+        "ogrenme_tamam": bool(ogrenme_tamam),
+        "hedef_soru": hedef,
+        "cozulen_soru": cozulen,
+        "kalan_soru": max(0, hedef - cozulen),
+        "tamamlandi": bool(tamam),
+    }
+
+
+def _mikro_ilerleme_satiri_sozluk(satir):
+    """`mikro_konu_ilerleme` satırını sözlüğe çevirir."""
+    return {
+        "ogrenci_id": satir["ogrenci_id"],
+        "ders": satir["ders"],
+        "makro_konu": satir["makro_konu"],
+        "mikro_konu": satir["mikro_konu"],
+        "alt_konu": satir["alt_konu"],
+        "ogrenme_tamam": bool(satir["ogrenme_tamam"]),
+        "hedef_soru": int(satir["hedef_soru"] or 0),
+        "cozulen_soru": int(satir["cozulen_soru"] or 0),
+        "kalan_soru": max(
+            0, int(satir["hedef_soru"] or 0) - int(satir["cozulen_soru"] or 0)
+        ),
+        "tamamlandi": bool(satir["tamamlandi"]),
+        "son_gorev_id": satir["son_gorev_id"],
+        "guncelleme_zamani": satir["guncelleme_zamani"],
+    }
+
+
+def mikro_ilerleme(ogrenci_id, ders, mikro_konu, alt_konu=None):
+    """Tek mikro konunun ilerleme kaydı (yoksa None)."""
+    alt = _metin(alt_konu)
+    sorgu = (
+        "SELECT * FROM mikro_konu_ilerleme WHERE ogrenci_id = ? AND ders = ?"
+        " AND mikro_konu = ?"
+    )
+    params = [ogrenci_id, ders, mikro_konu]
+    if alt:
+        sorgu += " AND alt_konu = ?"
+        params.append(alt)
+    try:
+        with _baglanti() as conn:
+            satir = conn.execute(sorgu, tuple(params)).fetchone()
+    except sqlite3.Error:  # pragma: no cover - tablo yoksa
+        return None
+    return _mikro_ilerleme_satiri_sozluk(satir) if satir is not None else None
+
+
+def mikro_ilerleme_listesi(ogrenci_id, ders=None, makro_konu=None, sadece_tamam=False):
+    """Öğrencinin mikro konu ilerlemeleri (ders/ana konu filtreli)."""
+    sorgu = "SELECT * FROM mikro_konu_ilerleme WHERE ogrenci_id = ?"
+    params = [ogrenci_id]
+    if ders:
+        sorgu += " AND ders = ?"
+        params.append(ders)
+    if makro_konu:
+        sorgu += " AND makro_konu = ?"
+        params.append(makro_konu)
+    if sadece_tamam:
+        sorgu += " AND tamamlandi = 1"
+    sorgu += " ORDER BY ders ASC, makro_konu ASC, mikro_konu ASC, alt_konu ASC"
+    try:
+        with _baglanti() as conn:
+            satirlar = conn.execute(sorgu, tuple(params)).fetchall()
+    except sqlite3.Error:  # pragma: no cover - tablo yoksa
+        return []
+    return [_mikro_ilerleme_satiri_sozluk(satir) for satir in satirlar]
+
+
+def mikro_tamamlananlar(ogrenci_id):
+    """Tamamlanmış mikro konular: {(ders, mikro_konu, alt_konu)}.
+
+    Planlayıcı bu kümeyi kullanır: tamamlanan mikro konu yeniden ÜRETİLMEZ.
+    """
+    return {
+        (kayit["ders"], kayit["mikro_konu"], kayit["alt_konu"])
+        for kayit in mikro_ilerleme_listesi(ogrenci_id, sadece_tamam=True)
+    }
+
+
+# ==============================================================================
 # SÜRE TAHMİNİ (planlanan süre; gerçek süre FAZ 4 oturumlarından gelir)
 # ==============================================================================
 def _yuvarla5(deger):
@@ -514,6 +796,44 @@ def _medyan(degerler):
     if n % 2:
         return float(sirali[orta])
     return (sirali[orta - 1] + sirali[orta]) / 2.0
+
+
+def _sure_degeri(deger):
+    """Pozitif sayıya çevirir; geçersiz/sıfır değerde None döner."""
+    try:
+        sayi = float(deger)
+    except (TypeError, ValueError):
+        return None
+    return sayi if sayi > 0 else None
+
+
+def mikro_anlatim_suresi(ogrenci_id, ders, mikro_konu, alt_konu=None,
+                         konu_sureleri=None):
+    """TEK süre kaynağı: bir mikro konunun anlatım süresi (dakika).
+
+    Öncelik sırası (FAZ 5D):
+      1) Mikro konuya ÖZEL tanımlı süre (`konu_sureleri[alt_konu]`).
+      2) Bu mikro konuda en az 3 GERÇEK ölçüm varsa medyan.
+      3) Alt başlığı olmayan (kendisi planlama birimi olan) konularda tanımlı süre.
+      4) Makul varsayılan (`VARSAYILAN_KONU_SURESI_DK`).
+
+    Ana konunun süresi alt başlıklara BÖLÜNMEZ ve her alt başlığa KOPYALANMAZ;
+    böylece "Polinomlar 80 dk" beş mikro konuya 16'şar dakika olarak yazılmaz.
+    """
+    konu_sureleri = konu_sureleri or {}
+    alt = _metin(alt_konu)
+    if alt:
+        tohum = _sure_degeri(konu_sureleri.get(alt))
+        if tohum:
+            return max(MIN_KONU_ANLATIM_DK, _yuvarla5(tohum))
+    medyan = konu_suresi_medyani(ogrenci_id, ders, mikro_konu, alt)
+    if medyan:
+        return max(MIN_KONU_ANLATIM_DK, _yuvarla5(medyan))
+    if not alt:
+        tohum = _sure_degeri(konu_sureleri.get(_metin(mikro_konu) or ""))
+        if tohum:
+            return max(MIN_KONU_ANLATIM_DK, _yuvarla5(tohum))
+    return max(MIN_KONU_ANLATIM_DK, _yuvarla5(VARSAYILAN_KONU_SURESI_DK))
 
 
 def konu_anlatim_dk(mikro_konu, alt_sayisi=1, konu_sureleri=None,
@@ -710,7 +1030,8 @@ def sure_plani(
 ):
     """Görevin PLANLANAN süre dökümü (dk).
 
-    - Konu anlatımı: KONU_SURELERI_DK (varsa) / alt başlık sayısı.
+    - Konu anlatımı: `konu_suresi_dk` (mikro konuya özel) → gerçek medyan →
+      makul varsayılan. Ana konu süresi alt başlıklara bölünmez.
     - Not: sabit kısa süre (adım varsa).
     - Soru çözümü: blok büyüklüğü × ders katsayısı (öğrenci hızı varsa o).
     - Yeterli gerçek ölçüm varsa (>=3 oturum) süre medyana göre ölçeklenir.
@@ -736,9 +1057,17 @@ def sure_plani(
     if ADIM_TEKRAR in turler:
         ogrenme = 20  # tekrar görevi: notları gözden geçirme
     elif ADIM_IZLE in turler:
-        ogrenme = konu_anlatim_dk(
-            mikro_konu, alt_sayisi, konu_sureleri, konu_suresi_dk
-        )
+        if konu_suresi_dk not in (None, "", 0):
+            try:
+                ogrenme = max(MIN_KONU_ANLATIM_DK, int(round(float(konu_suresi_dk))))
+            except (TypeError, ValueError):
+                ogrenme = 0
+        if not ogrenme:
+            # FAZ 5D: TEK süre kaynağı → mikro tohumu, gerçek medyan, varsayılan.
+            # Ana konu süresi alt başlıklara bölünmez/kopyalanmaz.
+            ogrenme = mikro_anlatim_suresi(
+                ogrenci_id, ders, mikro_konu, alt_konu, konu_sureleri
+            )
     not_dk = NOT_SURESI_DK if ADIM_NOT in turler else 0
 
     hiz = ogrenci_soru_hizi(ogrenci_id, ders)

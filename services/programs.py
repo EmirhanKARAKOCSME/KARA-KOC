@@ -209,6 +209,7 @@ CREATE TABLE IF NOT EXISTS calisma_programi_gorevler (
     mikro_konu TEXT,
     gorev_tanimi TEXT,
     hedef_soru INTEGER,
+    mikro_hedef_soru INTEGER,
     pedagoji_turu TEXT DEFAULT 'Pekiştirme',
     durum INTEGER DEFAULT 0,
     tarih TEXT,
@@ -222,6 +223,7 @@ CREATE TABLE IF NOT EXISTS calisma_programi_gorevler (
 
 _GOREV_EK_KOLONLAR = (
     ("alt_konu", "TEXT"),
+    ("mikro_hedef_soru", "INTEGER"),
     ("program_id", "INTEGER"),
     ("tahmini_sure_dk", "INTEGER"),
     ("kaynak_gorev_id", "INTEGER"),
@@ -343,6 +345,11 @@ def _gorev_normallestir(gorev, sira=1):
     if not mikro:
         raise ProgramHatasi("%d. görevin mikro konusu boş olamaz." % sira)
     hedef = _sayi_dogrula(gorev.get("hedef_soru") or 0, "Hedef soru sayısı", 0, 2000)
+    # FAZ 5D: mikro konunun TAM soru hedefi (görev bu hedefin bir parçası olabilir).
+    mikro_hedef = gorev.get("mikro_hedef_soru")
+    mikro_hedef = 0 if mikro_hedef in (None, "") else _sayi_dogrula(
+        mikro_hedef, "Mikro konu soru hedefi", 0, 2000
+    )
     sure = gorev.get("tahmini_sure_dk")
     sure = None if sure in (None, "") else _sayi_dogrula(
         sure, "Tahmini süre (dk)", 1, MAKS_GUNLUK_DAKIKA
@@ -363,6 +370,7 @@ def _gorev_normallestir(gorev, sira=1):
         "gorev_tanimi": _metin(gorev.get("gorev_tanimi"))
         or ("%s — %s" % (ders, mikro)),
         "hedef_soru": hedef,
+        "mikro_hedef_soru": mikro_hedef,
         "tahmini_sure_dk": sure,
         "pedagoji_turu": _metin(gorev.get("pedagoji_turu")) or "Pekiştirme",
         "tarih": tarih,
@@ -517,9 +525,9 @@ def _gorev_yaz(conn, ogrenci_id, program_id, gorev, zaman, an):
     imlec = conn.execute(
         "INSERT INTO calisma_programi_gorevler"
         " (ogrenci_id, program_id, gun, ders, makro_konu, mikro_konu,"
-        "  gorev_tanimi, hedef_soru, pedagoji_turu, durum, tarih,"
+        "  gorev_tanimi, hedef_soru, mikro_hedef_soru, pedagoji_turu, durum, tarih,"
         "  alt_konu, tahmini_sure_dk, kaynak_gorev_id)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
         (
             ogrenci_id,
             program_id,
@@ -529,6 +537,7 @@ def _gorev_yaz(conn, ogrenci_id, program_id, gorev, zaman, an):
             gorev["mikro_konu"],
             gorev["gorev_tanimi"],
             gorev["hedef_soru"],
+            gorev.get("mikro_hedef_soru") or 0,
             gorev["pedagoji_turu"],
             gorev["tarih"],
             gorev["alt_konu"],
