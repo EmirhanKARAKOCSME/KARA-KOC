@@ -9,6 +9,7 @@ import streamlit as st
 from services import study_sessions
 from services import programs as program_service
 from services import task_steps
+from services import planner
 
 # ==============================================================================
 # SİSTEM VE ZAMAN DİLİMİ AYARLARI (UTC+3 TÜRKİYE SAATİ)
@@ -1466,6 +1467,9 @@ program_service.init_db()
 
 # FAZ 5B: mikro görev alt adımları (checklist) şeması.
 task_steps.init_db()
+
+# FAZ 5C: günlük müsaitlik şeması.
+planner.init_db()
 
 def sanitize_key(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]", "_", str(text))
@@ -4504,6 +4508,92 @@ def _gorevleri_zenginlestir(gorevler, ogrenci_id):
     return sonuc
 
 
+def _gercek_cozulen_haritasi(ogrenci_id):
+    """Ders+mikro bazında GERÇEK çözülen soru (yalnızca tamamlanmış oturumlar)."""
+    sonuc = {}
+    try:
+        with get_connection() as conn:
+            satirlar = conn.execute(
+                "SELECT COALESCE(ders, 'Diğer') AS ders, mikro_konu,"
+                " COALESCE(SUM(cozulen_soru), 0) AS soru"
+                " FROM calisma_oturumlari WHERE ogrenci_id = ? AND durum = ?"
+                " GROUP BY COALESCE(ders, 'Diğer'), mikro_konu",
+                (ogrenci_id, "Tamamlandı"),
+            ).fetchall()
+    except Exception:  # noqa: BLE001 - tablo yoksa boş harita
+        return sonuc
+    for ders, mikro, soru in satirlar:
+        if mikro:
+            sonuc[(ders, mikro)] = int(soru or 0)
+    return sonuc
+
+
+def _planlama_onceki_gorevler(ogrenci_id):
+    """Aktif programdaki görevler (devredilebilir kalan miktarla birlikte)."""
+    sonuc = []
+    try:
+        aktif = program_service.aktif_program(ogrenci_id)
+        if not aktif:
+            return sonuc
+        for gorev in program_service.program_gorevleri(aktif["id"]):
+            kalan = program_service.devredilebilir_kalan(gorev["id"])
+            gorev["gercek_soru"] = kalan["gercek_soru"]
+            gorev["devredilen_soru"] = kalan["devredilen_soru"]
+            sonuc.append(gorev)
+    except Exception:  # noqa: BLE001
+        return []
+    return sonuc
+
+
+def _alarm_konulari(alarmlar_db):
+    """Alarm konularını öncelik sırasıyla düz listeye çevirir."""
+    sonuc = []
+    for kat in ("siyah", "kirmizi", "mor", "turuncu"):
+        for alarm in (alarmlar_db or {}).get(kat, []) or []:
+            ders = alarm.get("ders")
+            konu = alarm.get("konu")
+            if ders and konu:
+                sonuc.append({"ders": ders, "konu": konu, "seviye": kat})
+    return sonuc
+
+
+def planlama_baglami_olustur(ogrenci_id, aktif_mufredat, alarmlar_db,
+                             paragraf_soru=None):
+    """FAZ 5C: akıllı plan motorunun girdilerini hazırlar (yalnızca okuma)."""
+    durum = program_durumu_yukle(ogrenci_id)
+    pedagoji = {}
+    for ders, makro_dict in (aktif_mufredat or {}).items():
+        if not isinstance(makro_dict, dict):
+            continue
+        for makro, mikrolar in makro_dict.items():
+            if not isinstance(mikrolar, list):
+                continue
+            for mikro in mikrolar:
+                pedagoji[(ders, mikro)] = get_konu_pedagoji_turu(ders, mikro)
+    try:
+        tamamlanan_altlar = alt_durumlari_yukle(ogrenci_id)
+    except Exception:  # noqa: BLE001
+        tamamlanan_altlar = set()
+    return {
+        "ogrenci_id": ogrenci_id,
+        "baslangic": get_tr_now().date(),
+        "gun_sayisi": 7,
+        "musaitlik": planner.musaitlik_yukle(ogrenci_id),
+        "mufredat": aktif_mufredat,
+        "konu_sureleri": KONU_SURELERI_DK,
+        "soru_agirliklari": SORU_AGIRLIKLARI,
+        "on_kosullar": {**ON_KOSULLAR_EK, **ON_KOSULLAR},
+        "mikro_alt": MIKRO_ALT_KONULAR,
+        "bilinen_mikro": set(durum["bilinen_mikro"]),
+        "gercek_cozulen": _gercek_cozulen_haritasi(ogrenci_id),
+        "onceki_gorevler": _planlama_onceki_gorevler(ogrenci_id),
+        "paragraf_soru": max(10, int(paragraf_soru or 20)),
+        "pedagoji": pedagoji,
+        "tamamlanan_altlar": tamamlanan_altlar,
+        "alarm_konular": _alarm_konulari(alarmlar_db),
+    }
+
+
 def haftalik_program_gorevleri_uret(
     ogrenci_id,
     aktif_mufredat,
@@ -4514,14 +4604,27 @@ def haftalik_program_gorevleri_uret(
     gunler,
     filtered_pekistirme,
     filtered_ezber,
+    plan_baglami=None,
 ):
-    """Motor zinciri: alt başlık → soru kotalı → temel.
+    """Motor zinciri: akıllı plan (5C) → alt başlık → soru kotalı → temel.
 
     Hiçbir aşamada veritabanına yazılmaz veya silinmez; yalnızca görev listesi
     döner. Yazmayı `program_service.program_olustur` tek transaction'da yapar;
     hata olursa hiçbir şey değişmez (eski program aktif kalır).
     """
     uyarilar = []
+
+    # FAZ 5C: kredi puanı + gerçek ilerleme + günlük kapasiteye dayalı motor
+    if plan_baglami:
+        try:
+            sonuc = planner.plan_uret(plan_baglami)
+            if sonuc.get("gorevler"):
+                uyarilar.extend(sonuc.get("uyarilar") or [])
+                return sonuc["gorevler"], "Akıllı plan", uyarilar
+            uyarilar.append("Akıllı plan boş döndü.")
+        except Exception as hata:  # noqa: BLE001
+            uyarilar.append("Akıllı plan çalışmadı: %s" % hata)
+
     try:
         gorevler = akilli_program_motoru_v2_gorevleri(
             ogrenci_id,
@@ -7227,7 +7330,45 @@ with tab5:
 
     with col_p1:
         st.subheader("⚙️ Program Oluşturma Ayarları")
-        gunluk_saat = st.slider("Günlük Çalışma Süresi (Saat):", 2, 12, 6)
+        # FAZ 5C: haftanın her günü için ayrı müsaitlik (0 = dinlenme günü).
+        kayitli_musaitlik = planner.musaitlik_yukle(current_user["id"])
+        musaitlik_saat = {}
+        with st.expander("🗓️ Haftalık müsaitlik (saat)", expanded=True):
+            st.caption(
+                "Her gün için ayırabileceğin süreyi seç. **0 saat = dinlenme"
+                " günü.** Bu tercihler kaydedilir ve yeni programlarda tekrar"
+                " sorulmaz."
+            )
+            gun_kolonlari = st.columns(4)
+            for gun_no, gun_adi in enumerate(GUN_ADLARI_LISTE, start=1):
+                with gun_kolonlari[(gun_no - 1) % 4]:
+                    musaitlik_saat[gun_no] = st.number_input(
+                        gun_adi,
+                        min_value=0,
+                        max_value=12,
+                        value=int(round(kayitli_musaitlik.get(gun_no, 360) / 60)),
+                        step=1,
+                        key=f"musaitlik_saat_{gun_no}",
+                        help="%s günü kaç saat çalışabilirsin?" % gun_adi,
+                    )
+            if st.button("💾 Müsaitliği kaydet", key="musaitlik_kaydet_btn"):
+                try:
+                    planner.musaitlik_kaydet(
+                        current_user["id"],
+                        {gun: int(saat) * 60 for gun, saat in musaitlik_saat.items()},
+                    )
+                except planner.PlanHatasi as hata:
+                    st.error("⚠️ %s" % hata)
+                else:
+                    set_flash_message("success", "🗓️ Haftalık müsaitlik kaydedildi.")
+                    st.rerun()
+
+        gunluk_saat = int(round(sum(musaitlik_saat.values()) / 7.0))
+        gunluk_saat = max(1, min(12, gunluk_saat or 6))
+        st.caption(
+            "Haftalık ortalama: **%d saat/gün** · Toplam: **%d saat**"
+            % (gunluk_saat, sum(musaitlik_saat.values()))
+        )
 
         toplam_gunluk_dakika = gunluk_saat * 60
         maks_soru_kapasitesi = int(toplam_gunluk_dakika / 1.5)
@@ -7361,6 +7502,12 @@ with tab5:
                     gunler,
                     filtered_pekistirme,
                     filtered_ezber,
+                    plan_baglami=planlama_baglami_olustur(
+                        current_user["id"],
+                        aktif_mufredat_hiyerarsisi,
+                        alarmlar_db,
+                        paragraf_soru=günlük_paragraf_hedef,
+                    ),
                 )
 
             # FAZ 5A: program TEK transaction'da yazılır ve hiçbir görev silinmez.
