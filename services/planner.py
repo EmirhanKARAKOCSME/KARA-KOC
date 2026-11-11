@@ -1,16 +1,28 @@
-"""FAZ 5C - Gerçek ilerlemeye dayalı akıllı haftalık program motoru.
+"""FAZ 5C/5D - Gerçek ilerlemeye dayalı akıllı haftalık program motoru.
 
 İlkeler:
 
+- **Planlama birimi mikro konudur (FAZ 5D).** Ders → ana konu → mikro konu →
+  checklist. Bir ana konunun alt başlıkları tek görevde BİRLEŞTİRİLMEZ; her
+  mikro konu kendi görev kaydı, kendi tamamlanma durumu, kendi checklist'i,
+  kendi soru hedefi ve kendi süresiyle planlanır.
+- **Ana konu kotası korunur.** Ana konunun soru hedefi mikro konulara
+  paylaştırılır; mikro hedeflerin toplamı ana hedefe eşittir. Aynı hedef her
+  mikro konuya tekrar uygulanmaz.
+- **Süre bölünmez, mikro konuya göre hesaplanır.** Ana konunun anlatım süresi
+  mikro konu sayısına bölünmez; mikro konunun kendi süresi (varsa), yoksa ana
+  konunun süresi makul varsayılan olarak kullanılır ve gerçek oturum medyanı
+  ile kişiselleştirilir.
 - **Gerçek soru kaynağı yalnızca FAZ 4 oturumlarıdır.** `konu_soru_ilerleme`
   (eski planlama sayacı) burada hiç okunmaz.
-- **Kota arka planda kalır.** Kredi puanı, makro konu kotası, kalan soru
+- **Kota arka planda kalır.** Kredi puanı, ana konu kotası, kalan soru
   matematiği ve öncelik puanları öğrenci arayüzünde gösterilmez.
 - **Günlük kapasite aşılmaz.** Her gün için ayrı müsaitlik (dakika) tanımlıdır;
   0 dakika dinlenme günüdür. Görev süreleri `task_steps` ile aynı formülle
   hesaplandığı için planlanan süre gerçek tahminle tutarlıdır.
-- **Yarım kalan görevler devredilir.** Önceki programdan kalan soru miktarı yeni
-  göreve `kaynak_gorev_id` ile bağlanır; `programs` modülü çift devri engeller.
+- **Haftaya sığmayan mikro konular devredilir.** Önceki programdan kalan soru
+  miktarı yeni göreve `kaynak_gorev_id` ile bağlanır; tamamlanmış mikro konu
+  yeniden üretilmez.
 - **Ön koşul ağacı korunur.** Ön koşulu tamamlanmamış konuya geçilmez.
 
 Bu modül Streamlit'e bağımlı değildir.
@@ -366,12 +378,141 @@ def _on_kosul_hazir(mikro, bilinen, kurallar, derinlik=0):
     return True
 
 
-def _alt_konu_sec(ders, mikro, mikro_alt, tamamlanan_altlar):
-    """Mikro konunun henüz bitmemiş ilk alt başlığı (varsa)."""
-    for alt in (mikro_alt or {}).get(mikro, []) or []:
-        if (ders, mikro, alt) not in (tamamlanan_altlar or set()):
-            return alt
-    return None
+def alt_listesi(mikro, mikro_alt):
+    """Ana konunun mikro konuları (alt başlıkları); yoksa boş liste."""
+    return [a for a in (mikro_alt or {}).get(mikro, []) or [] if a]
+
+
+def mikro_soru_paylari(ana_hedef, mikrolar, agirliklar=None):
+    """Ana konunun soru hedefini mikro konulara tam sayı olarak paylaştırır.
+
+    FAZ 5D: aynı makro hedef her mikro konuya tekrar UYGULANMAZ; payların
+    toplamı ana hedefe eşittir (yuvarlama artığı en büyük kalan yöntemiyle
+    dağıtılır). Ağırlık verilmezse eşit bölünür.
+    """
+    liste = [m for m in (mikrolar or []) if m]
+    if not liste:
+        return {}
+    agirliklar = agirliklar or {}
+    return mikro_hedeflere_dagit(
+        ana_hedef, liste, {m: agirliklar.get(m, 1.0) for m in liste}
+    )
+
+
+def _tek_alt(deger):
+    """'A||B' biçimindeki alt başlık metninden tek mikro konu adı çıkarır."""
+    parcalar = [p.strip() for p in str(deger or "").split("||") if p.strip()]
+    return parcalar[0] if len(parcalar) == 1 else None
+
+
+def _gorev_turu_tahmin(gorev):
+    """Görev türünü mevcut alandan okur; yoksa tanımdan çıkarır."""
+    tur = (gorev.get("gorev_turu") or "").strip()
+    if tur:
+        return tur
+    tanim = str(gorev.get("gorev_tanimi") or "")
+    if "🧩" in tanim:
+        return "soru"
+    if "anlatım" in tanim.lower() or "UYGULAMA" in tanim or "📌" in tanim:
+        return "anlatim"
+    return "anlatim"
+
+
+def mikro_gorev_tanimi(ana_konu, mikro, soru, gorev_turu="anlatim"):
+    """Tek mikro konuya ait görev metni (ana konu ➔ mikro konu)."""
+    if gorev_turu == "anlatim":
+        kuyruk = ", ardından %d soru çöz" % int(soru) if int(soru or 0) > 0 else ""
+        return (
+            "📌 %s ➔ %s: konu anlatımını izle ve kısa özet çıkar%s."
+            % (ana_konu, mikro, kuyruk)
+        )
+    if gorev_turu == "tekrar":
+        return "🔄 %s ➔ %s: özet notlarını oku." % (ana_konu, mikro)
+    return "🧩 %s ➔ %s: %d soru çöz." % (ana_konu, mikro, int(soru or 0))
+
+
+def mikro_gorevlere_ayir(
+    gorevler_or_gorev,
+    mikro_alt=None,
+    konu_sureleri=None,
+    tamamlanan_altlar=None,
+    agirliklar=None,
+):
+    """Ana konu seviyesindeki görevleri MİKRO KONU başına ayrı görevlere böler.
+
+    FAZ 5D: Her mikro konu kendi görev kaydı, kendi süresi ve kendi soru
+    hedefiyle üretilir. Ana konunun soru hedefi mikro konulara paylaştırılır;
+    toplam korunur. Tek mikro içeren görev olduğu gibi döner (idempotent).
+
+    `gorevler_or_gorev` tek bir görev sözlüğü veya görev listesi olabilir.
+    """
+    tek = isinstance(gorevler_or_gorev, dict)
+    kaynak = [gorevler_or_gorev] if tek else list(gorevler_or_gorev or [])
+    sonuc = []
+    for gorev in kaynak:
+        sonuc.extend(
+            _gorevi_mikrolara_ayir(
+                gorev, mikro_alt, konu_sureleri, tamamlanan_altlar, agirliklar
+            )
+        )
+    return sonuc
+
+
+def _gorevi_mikrolara_ayir(gorev, mikro_alt, konu_sureleri, tamamlanan_altlar,
+                           agirliklar):
+    if not isinstance(gorev, dict):
+        return []
+    ders = gorev.get("ders")
+    ana = (gorev.get("mikro_konu") or "").strip()
+    if not ders or not ana:
+        return [gorev]
+    # Tekrar / deneme tekrarı görevleri ana konu düzeyinde kalır.
+    if (gorev.get("pedagoji_turu") or "") == "Tekrar":
+        return [gorev]
+    if (gorev.get("makro_konu") or "") == "Deneme Tekrarı":
+        return [gorev]
+
+    mevcut = [p.strip() for p in str(gorev.get("alt_konu") or "").split("||") if p.strip()]
+    if mevcut:
+        alts = mevcut
+    else:
+        alts = [
+            a for a in alt_listesi(ana, mikro_alt)
+            if (ders, ana, a) not in (tamamlanan_altlar or set())
+        ]
+    if not alts:
+        return [gorev]
+    if len(alts) == 1:
+        if mevcut:
+            return [gorev]  # zaten tek mikro konu
+        yeni = dict(gorev)
+        yeni["alt_konu"] = alts[0]
+        yeni["gorev_turu"] = _gorev_turu_tahmin(gorev)
+        yeni["gorev_tanimi"] = mikro_gorev_tanimi(
+            ana, alts[0], gorev.get("hedef_soru") or 0, yeni["gorev_turu"]
+        )
+        return [yeni]
+
+    hedef = max(0, int(gorev.get("hedef_soru") or 0))
+    paylar = mikro_soru_paylari(hedef, alts, agirliklar)
+    ana_sure = gorev.get("konu_suresi_dk")
+    if ana_sure in (None, "", 0):
+        ana_sure = (konu_sureleri or {}).get(ana, task_steps.VARSAYILAN_KONU_SURESI_DK)
+    sureler = task_steps.mikro_sure_paylari(ana_sure, alts, agirliklar)
+
+    gorev_turu = _gorev_turu_tahmin(gorev)
+    parcalar = []
+    for alt in alts:
+        yeni = dict(gorev)
+        yeni["alt_konu"] = alt
+        yeni["hedef_soru"] = int(paylar.get(alt, 0))
+        yeni["gorev_turu"] = gorev_turu
+        yeni["konu_suresi_dk"] = sureler.get(alt)
+        yeni["gorev_tanimi"] = mikro_gorev_tanimi(
+            ana, alt, yeni["hedef_soru"], gorev_turu
+        )
+        parcalar.append(yeni)
+    return parcalar
 
 
 def _gorev_uret(
@@ -387,26 +528,33 @@ def _gorev_uret(
     alt_konu=None,
     pedagoji=None,
     alt_sayisi=None,
+    sure_dk=None,
 ):
-    """Görev sözlüğü + alt adımlar + planlanan süre."""
+    """Görev sözlüğü + alt adımlar + planlanan süre.
+
+    FAZ 5D: `alt_konu` tek bir MİKRO KONUdur; görev metni ana konu ➔ mikro
+    konu biçiminde kurulur. `sure_dk` verilirse bu mikro konunun kendi
+    anlatım süresi kullanılır (ana konu süresi mikro konulara paylaştırılmıştır).
+    """
+    etiket = "%s ➔ %s" % (mikro, alt_konu) if alt_konu else mikro
     if tur == "tekrar":
-        tanim = "🔄 %s ➔ özet notlarını oku, hatırlatma sorularını çöz." % mikro
+        tanim = "🔄 %s: özet notlarını oku, hatırlatma sorularını çöz." % etiket
         soru = min(5, max(0, int(soru or 5)))
         pedagoji = "Tekrar"
     elif tur == "devir":
-        tanim = "➡️ %s ➔ geçen programdan kalan %d soruyu çöz." % (mikro, soru)
+        tanim = "➡️ %s: geçen programdan kalan %d soruyu çöz." % (etiket, soru)
     elif tur == "alarm":
         tanim = (
-            "🔁 %s ➔ denemede yanlış yaptığın soruları incele ve %d soru çöz."
-            % (mikro, soru)
+            "🔁 %s: denemede yanlış yaptığın soruları incele ve %d soru çöz."
+            % (etiket, soru)
         )
     elif tur == "anlatim":
         tanim = (
-            "📌 %s ➔ konu anlatımını izle ve kısa özet çıkar, ardından %d soru çöz."
-            % (mikro, soru)
+            "📌 %s: konu anlatımını izle ve kısa özet çıkar, ardından %d soru çöz."
+            % (etiket, soru)
         )
     else:
-        tanim = "🧩 %s ➔ %d soru çöz." % (mikro, soru)
+        tanim = "🧩 %s: %d soru çöz." % (etiket, soru)
     gorev = {
         "ders": ders,
         "makro_konu": makro,
@@ -419,6 +567,8 @@ def _gorev_uret(
         "tarih": tarih.isoformat(),
         "kaynak_gorev_id": kaynak_gorev_id,
     }
+    if sure_dk not in (None, "", 0):
+        gorev["konu_suresi_dk"] = int(sure_dk)
     if alt_sayisi is None:
         alt_sayisi = 1
         if alt_konu:
@@ -438,12 +588,16 @@ def _gorev_uret(
 def plan_uret(baglam):
     """Haftalık görev planını üretir (yalnızca bellek; veritabanına yazmaz).
 
+    FAZ 5D: Planlama birimi ANA KONU değil MİKRO KONUdur. Ana konunun soru
+    hedefi ve işi mikro konularına paylaştırılır; her mikro konu kendi görev
+    kaydı, kendi checklist'i, kendi soru hedefi ve kendi süresiyle planlanır.
+
     Öncelik sırası:
         1) Önceki programdan kalan gerçek eksikler (devir)
         2) Süresi geçmiş / bekleyen tekrar görevleri
         3) Deneme analizinden gelen kritik konular
-        4) Ön koşulu tamamlanmış yeni mikro konular
-        5) Pekiştirme gerektiren (öğrenilmiş) konular
+        4) Ön koşulu tamamlanmış yeni ana konuların mikro konuları
+        5) Pekiştirme gerektiren (öğrenilmiş) konuların mikro konuları
         6) Diğer düzenli çalışmalar (günlük paragraf)
     """
     if not isinstance(baglam, dict):
@@ -463,6 +617,11 @@ def plan_uret(baglam):
     mikro_alt = baglam.get("mikro_alt") or {}
     tamamlanan_alt = set(baglam.get("tamamlanan_altlar") or [])
     gercek = dict(baglam.get("gercek_cozulen") or {})
+    mikro_cozulen = {
+        (str(anahtar[0]), str(anahtar[1]), str(anahtar[2])): int(deger or 0)
+        for anahtar, deger in (baglam.get("mikro_cozulen") or {}).items()
+        if isinstance(anahtar, (tuple, list)) and len(anahtar) >= 3
+    }
     bilinen = set(baglam.get("bilinen_mikro") or [])
     kurallar = baglam.get("on_kosullar") or {}
     pedagoji_map = baglam.get("pedagoji") or {}
@@ -479,62 +638,134 @@ def plan_uret(baglam):
     gun_gorev = {gun: [] for gun in gunler}
     gun_yeni = {gun: 0 for gun in gunler}
     gun_yeni_ders = {gun: set() for gun in gunler}
+    gun_mikro = {gun: set() for gun in gunler}
     planlanan = set()
     kuyruk = {}
 
     def _kuyruga_ekle(oge):
-        anahtar = (oge["ders"], oge["mikro"])
-        mevcut = kuyruk.get(anahtar)
-        if mevcut is None or oge["oncelik"] < mevcut["oncelik"]:
+        anahtar = (oge["ders"], oge["ana"], oge["mikro"])
+        mevcut_oge = kuyruk.get(anahtar)
+        if mevcut_oge is None or oge["oncelik"] < mevcut_oge["oncelik"]:
             kuyruk[anahtar] = oge
 
-    def _kalan_hedef(ders, makro, mikro):
+    def _kalan_hedef(ders, makro, ana):
         hedef = _mikro_hedef(
-            ders, makro, mikro, mufredat, soru_agirliklari, konu_sureleri
+            ders, makro, ana, mufredat, soru_agirliklari, konu_sureleri
         )
-        return max(0, hedef - int(gercek.get((ders, mikro), 0) or 0))
+        return max(0, hedef - int(gercek.get((ders, ana), 0) or 0))
 
-    # 1) Devir + 2) tekrar
+    def _mikro_sure(ana, alt):
+        """Mikro konunun kendi anlatım süresi.
+
+        FAZ 5D: ana konunun süresi mikro konu sayısına BÖLÜNMEZ (80 dk'lık
+        konuyu 5'e bölüp 16 dk vermek gerçekçi değildir). Sıra:
+          1) Mikro konunun kendi süresi (`konu_sureleri[alt]`),
+          2) Ana konunun tanımlı süresi (makul varsayılan),
+          3) Genel varsayılan süre.
+        Gerçek oturum verisi varsa `task_steps` medyanı bunun üzerine uygular.
+        """
+        for anahtar in (alt, ana):
+            if not anahtar:
+                continue
+            deger = konu_sureleri.get(anahtar)
+            if deger in (None, "", 0):
+                continue
+            try:
+                return float(deger)
+            except (TypeError, ValueError):
+                continue
+        return float(task_steps.VARSAYILAN_KONU_SURESI_DK)
+
+    def _mikro_dilimi(ders, makro, ana):
+        """Ana konunun kalan işini MİKRO KONULARA paylaştırır.
+
+        Dönen liste: [(mikro_konu, hedef_soru, anlatim_dk), ...]
+        - Tamamlanmış mikro konu yeniden üretilmez.
+        - Her mikro konu kendi soru hedefini ve kendi anlatım süresini alır;
+          soru paylarının toplamı ana konunun hedefini aşmaz.
+        - Mikro konusu olmayan ana konularda tek parça (mikro=None) döner.
+        """
+        butce = _kalan_hedef(ders, makro, ana)
+        if butce <= 0:
+            return []
+        tum_alts = alt_listesi(ana, mikro_alt)
+        if not tum_alts:
+            return [(None, butce, None)]
+        alts = [a for a in tum_alts if (ders, ana, a) not in tamamlanan_alt]
+        if not alts:
+            return []
+        sureler = {alt: _mikro_sure(ana, alt) for alt in alts}
+        cozulen_mikro = {
+            anahtar[2]: int(deger or 0)
+            for anahtar, deger in mikro_cozulen.items()
+            if anahtar[0] == ders and anahtar[1] == ana
+        }
+        if cozulen_mikro:
+            hedef_tam = _mikro_hedef(
+                ders, makro, ana, mufredat, soru_agirliklari, konu_sureleri
+            )
+            paylar = mikro_soru_paylari(hedef_tam, tum_alts)
+        else:
+            paylar = mikro_soru_paylari(butce, alts)
+        dilimler = []
+        kalan_butce = butce
+        for alt in alts:
+            pay = int(paylar.get(alt, 0)) - int(cozulen_mikro.get(alt, 0))
+            pay = max(0, min(pay, kalan_butce))
+            if pay <= 0:
+                continue
+            kalan_butce -= pay
+            dilimler.append((alt, pay, sureler.get(alt)))
+        return dilimler
+
+    # 1) Devir + 2) tekrar (devir kendi mikro konusuna bağlanır)
     for gorev in onceki:
         ders = gorev.get("ders")
-        mikro = gorev.get("mikro_konu")
-        if not (ders and mikro) or gorev.get("durum"):
+        ana = gorev.get("mikro_konu")
+        if not (ders and ana) or gorev.get("durum"):
             continue
-        makro = gorev.get("makro_konu") or _makro_bul(mufredat, ders, mikro)
+        makro = gorev.get("makro_konu") or _makro_bul(mufredat, ders, ana)
+        mikro = _tek_alt(gorev.get("alt_konu"))
         kalan = gorev_kalan_soru(gorev)
         if (gorev.get("pedagoji_turu") or "") == "Tekrar":
             _kuyruga_ekle({
                 "oncelik": 2, "tur": "tekrar", "ders": ders, "makro": makro,
-                "mikro": mikro, "kalan": 5, "kaynak": gorev.get("id"),
+                "ana": ana, "mikro": mikro, "kalan": 5,
+                "kaynak": gorev.get("id"), "pay_dk": None,
             })
             continue
         if kalan <= 0:
             continue
-        tur = "devir" if mikro in bilinen else "anlatim"
+        tur = "devir" if ana in bilinen else "anlatim"
         _kuyruga_ekle({
             "oncelik": 1, "tur": tur, "ders": ders, "makro": makro,
-            "mikro": mikro, "kalan": kalan, "kaynak": gorev.get("id"),
+            "ana": ana, "mikro": mikro, "kalan": kalan,
+            "kaynak": gorev.get("id"), "pay_dk": None,
         })
 
     # 3) Alarm konuları
     for alarm in baglam.get("alarm_konular") or []:
         ders = alarm.get("ders")
-        mikro = alarm.get("konu") or alarm.get("mikro")
-        if not (ders and mikro):
+        ana = alarm.get("konu") or alarm.get("mikro")
+        if not (ders and ana):
             continue
-        makro = _makro_bul(mufredat, ders, mikro)
-        kalan = _kalan_hedef(ders, makro, mikro)
-        if kalan <= 0:
-            kalan = max(10, paragraf_soru)
-        _kuyruga_ekle({
-            "oncelik": 3,
-            "tur": "alarm" if mikro in bilinen else "anlatim",
-            "ders": ders,
-            "makro": makro,
-            "mikro": mikro,
-            "kalan": kalan,
-            "kaynak": None,
-        })
+        makro = _makro_bul(mufredat, ders, ana)
+        dilimler = _mikro_dilimi(ders, makro, ana)
+        if not dilimler:
+            yedek = alt_listesi(ana, mikro_alt)[:1] or [None]
+            dilimler = [(yedek[0], max(10, paragraf_soru), None)]
+        for alt, pay, sure in dilimler:
+            _kuyruga_ekle({
+                "oncelik": 3,
+                "tur": "alarm" if ana in bilinen else "anlatim",
+                "ders": ders,
+                "makro": makro,
+                "ana": ana,
+                "mikro": alt,
+                "kalan": pay,
+                "kaynak": None,
+                "pay_dk": sure,
+            })
 
     # 4) Yeni mikro konular (ön koşulu hazır)
     for ders, makro_dict in (mufredat or {}).items():
@@ -543,31 +774,31 @@ def plan_uret(baglam):
         for makro, mikrolar in makro_dict.items():
             if not isinstance(mikrolar, list):
                 continue
-            for mikro in mikrolar:
-                if mikro in bilinen or (ders, mikro) in planlanan:
+            for ana in mikrolar:
+                if ana in bilinen:
                     continue
-                if not _on_kosul_hazir(mikro, bilinen, kurallar):
+                if not _on_kosul_hazir(ana, bilinen, kurallar):
                     continue
-                kalan = _kalan_hedef(ders, makro, mikro)
-                if kalan <= 0:
-                    continue
-                _kuyruga_ekle({
-                    "oncelik": 4, "tur": "anlatim", "ders": ders, "makro": makro,
-                    "mikro": mikro, "kalan": kalan, "kaynak": None,
-                })
+                for alt, pay, sure in _mikro_dilimi(ders, makro, ana):
+                    if (ders, ana, alt) in planlanan:
+                        continue
+                    _kuyruga_ekle({
+                        "oncelik": 4, "tur": "anlatim", "ders": ders,
+                        "makro": makro, "ana": ana, "mikro": alt,
+                        "kalan": pay, "kaynak": None, "pay_dk": sure,
+                    })
 
     # 5) Pekiştirme (öğrenilmiş ama soru hedefi dolmamış)
-    for (ders, mikro), cozulen in list(gercek.items()):
-        if ders is None or mikro is None:
+    for (ders, ana), cozulen in list(gercek.items()):
+        if ders is None or ana is None:
             continue
-        makro = _makro_bul(mufredat, ders, mikro)
-        kalan = _kalan_hedef(ders, makro, mikro)
-        if kalan <= 0:
-            continue
-        _kuyruga_ekle({
-            "oncelik": 5, "tur": "pes", "ders": ders, "makro": makro,
-            "mikro": mikro, "kalan": kalan, "kaynak": None,
-        })
+        makro = _makro_bul(mufredat, ders, ana)
+        for alt, pay, sure in _mikro_dilimi(ders, makro, ana):
+            _kuyruga_ekle({
+                "oncelik": 5, "tur": "pes", "ders": ders, "makro": makro,
+                "ana": ana, "mikro": alt, "kalan": pay, "kaynak": None,
+                "pay_dk": None,
+            })
     # ------------------------------------------------------------------
     # YERLEŞTİRME (günlük kapasite asla aşılmaz)
     # ------------------------------------------------------------------
@@ -603,11 +834,13 @@ def plan_uret(baglam):
             if kalan_dk < MIN_ANLAMLI_BLOK:
                 break
             adaylar = sorted(
-                kuyruk.values(),
-                key=lambda o: (o["oncelik"], -o["kalan"]),
+                kuyruk.items(),
+                key=lambda cift: (cift[1]["oncelik"], -cift[1]["kalan"]),
             )
             yerlesti = False
-            for oge in adaylar:
+            for oge_anahtar, oge in adaylar:
+                if oge_anahtar in gun_mikro[tarih]:
+                    continue  # aynı mikro konu aynı gün iki görev olmaz
                 if oge["tur"] == "anlatim":
                     if gun_yeni[tarih] >= MAKS_YENI_MIKRO_GUN:
                         continue
@@ -619,39 +852,40 @@ def plan_uret(baglam):
                 hedef_soru = oge["kalan"]
                 if oge["tur"] == "anlatim":
                     hedef_soru = min(MAKS_GOREV_SORU, max(10, oge["kalan"] // 2), oge["kalan"])
-                alt = _alt_konu_sec(
-                    oge["ders"], oge["mikro"], mikro_alt, tamamlanan_alt
-                )
-                alt_sayisi = max(1, len(mikro_alt.get(oge["mikro"], []) or []))
                 pedagoji = pedagoji_map.get(
-                    (oge["ders"], oge["mikro"]), "Pekiştirme"
+                    (oge["ders"], oge["ana"]), "Pekiştirme"
                 )
                 gorev = _soru_sayisi_sigdir(
                     oge["tur"],
                     oge["ders"],
                     oge["makro"],
-                    oge["mikro"],
+                    oge["ana"],
                     tarih,
                     int(hedef_soru or 0),
                     kalan_dk,
                     oge["kaynak"],
                     ogrenci_id,
                     konu_sureleri,
-                    alt,
+                    oge["mikro"],
                     pedagoji,
-                    alt_sayisi=alt_sayisi,
+                    alt_sayisi=1,
+                    sure_dk=oge.get("pay_dk"),
                 )
                 if gorev is None:
                     continue
                 gun_gorev[tarih].append(gorev)
                 gun_dk[tarih] += int(gorev.get("tahmini_sure_dk") or 0)
-                planlanan.add((oge["ders"], oge["mikro"]))
+                gun_mikro[tarih].add(oge_anahtar)
+                planlanan.add(oge_anahtar)
                 oge["kalan"] = max(0, oge["kalan"] - int(gorev["hedef_soru"]))
                 if oge["tur"] == "anlatim":
                     gun_yeni[tarih] += 1
                     gun_yeni_ders[tarih].add(oge["ders"])
+                    # Devam görevi yalnızca soru içerir; anlatım tekrar edilmez.
+                    oge["tur"] = "pes"
+                    oge["pay_dk"] = None
                 if oge["tur"] == "tekrar" or oge["kalan"] <= 0:
-                    kuyruk.pop((oge["ders"], oge["mikro"]), None)
+                    kuyruk.pop(oge_anahtar, None)
                 yerlesti = True
                 break
             if not yerlesti:
@@ -688,19 +922,27 @@ def plan_uret(baglam):
 def _soru_sayisi_sigdir(
     tur, ders, makro, mikro, tarih, kalan_soru, kalan_dk,
     kaynak, ogrenci_id, konu_sureleri, alt_konu, pedagoji, alt_sayisi=1,
+    sure_dk=None,
 ):
-    """Kalan süreye sığan en büyük soru sayısıyla görevi üretir (yoksa None)."""
+    """Kalan süreye sığan en büyük soru sayısıyla görevi üretir (yoksa None).
+
+    FAZ 5D: mikro konunun hedefi 5'in altındaysa (ana konu kotası mikro
+    konulara paylaştırıldığında oluşabilir) hedef küçültülmez; tek küçük blok
+    olarak planlanır. Aksi hâlde bloklar 5-10 aralığında kalır.
+    """
     adaylar = []
     for soru in (min(MAKS_GOREV_SORU, kalan_soru), 15, 10, 5):
         if soru < MIN_ANLAMLI_BLOK or soru > kalan_soru:
             continue
         if soru not in adaylar:
             adaylar.append(soru)
+    if not adaylar and 0 < kalan_soru < MIN_ANLAMLI_BLOK:
+        adaylar.append(int(kalan_soru))
     for soru in adaylar:
         gorev = _gorev_uret(
             tur, ders, makro, mikro, tarih, soru, kaynak, ogrenci_id,
             konu_sureleri, alt_konu=alt_konu, pedagoji=pedagoji,
-            alt_sayisi=alt_sayisi,
+            alt_sayisi=alt_sayisi, sure_dk=sure_dk,
         )
         if int(gorev.get("tahmini_sure_dk") or 0) <= kalan_dk:
             return gorev

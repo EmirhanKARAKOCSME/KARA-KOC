@@ -36,6 +36,7 @@ MIN_SORU_BLOGU = 5
 MAKS_SORU_BLOGU = 10
 NOT_SURESI_DK = 6
 VARSAYILAN_KONU_SURESI_DK = 60
+MIN_KONU_ANLATIM_DK = 10
 VARSAYILAN_SORU_SURESI_DK = 1.5
 MIN_GERCEK_OLCUM = 3
 VARSAYILAN_DB_YOLU = "yks_veritabani.db"
@@ -515,13 +516,24 @@ def _medyan(degerler):
     return (sirali[orta - 1] + sirali[orta]) / 2.0
 
 
-def konu_anlatim_dk(mikro_konu, alt_sayisi=1, konu_sureleri=None):
+def konu_anlatim_dk(mikro_konu, alt_sayisi=1, konu_sureleri=None,
+                    konu_suresi_dk=None):
     """Mikro konunun konu anlatımı süresi.
 
     `konu_sureleri` (KONU_SURELERI_DK) konu anlatımı süresidir; soru çözümü
     ayrı hesaplandığı için burada iki kez sayılmaz. Görev, mikro konunun
     yalnızca birkaç alt başlığını kapsıyorsa süre alt başlık sayısına bölünür.
+
+    FAZ 5D: `konu_suresi_dk` verilirse (ana konunun süresi mikro konulara
+    paylaştırılmışsa) bölme yapılmaz; bu görevin kendi anlatım süresi kullanılır.
     """
+    if konu_suresi_dk not in (None, "", 0):
+        try:
+            pay = float(konu_suresi_dk)
+        except (TypeError, ValueError):
+            pay = 0.0
+        if pay > 0:
+            return max(MIN_KONU_ANLATIM_DK, int(round(pay)))
     konu_sureleri = konu_sureleri or {}
     anahtar = _metin(mikro_konu) or ""
     toplam = konu_sureleri.get(anahtar, VARSAYILAN_KONU_SURESI_DK)
@@ -533,10 +545,66 @@ def konu_anlatim_dk(mikro_konu, alt_sayisi=1, konu_sureleri=None):
         alt = max(1, int(alt_sayisi or 1))
     except (TypeError, ValueError):
         alt = 1
-    return max(10, _yuvarla5(toplam / alt))
+    return max(MIN_KONU_ANLATIM_DK, _yuvarla5(toplam / alt))
 
 
-def _ders_oturumlari(conn, ogrenci_id, ders=None, mikro_konu=None):
+def mikro_sure_paylari(toplam_dk, mikrolar, agirliklar=None,
+                       taban=MIN_KONU_ANLATIM_DK):
+    """Ana konunun anlatım süresini mikro konulara tam sayı olarak paylaştırır.
+
+    - Paylar ağırlığa (iş yükü) göre dağıtılır; ağırlık yoksa eşit bölünür.
+    - Payların toplamı `toplam_dk`'ya EŞİTTİR (yuvarlama artığı en büyük
+      kalan yöntemiyle dağıtılır) — süre kaybı/şişmesi olmaz.
+    - Yeterli süre varsa her mikro en az `taban` dakika alır; yetmiyorsa
+      eşit bölünür (küçük sürelerde taban zorlanmaz).
+    - Hiçbir mikro sıfır süre almaz (pay 0 ise taban uygulanır).
+    """
+    liste = [m for m in (mikrolar or []) if m]
+    if not liste:
+        return {}
+    try:
+        toplam = max(0, int(round(float(toplam_dk or 0))))
+    except (TypeError, ValueError):
+        toplam = 0
+    if toplam <= 0:
+        return {m: 0 for m in liste}
+    agirliklar = agirliklar or {}
+    ham = []
+    for mikro in liste:
+        try:
+            agirlik = float(agirliklar.get(mikro, 1.0))
+        except (TypeError, ValueError):
+            agirlik = 1.0
+        ham.append(max(0.1, agirlik))
+    toplam_agirlik = sum(ham)
+    kesirli = {m: toplam * w / toplam_agirlik for m, w in zip(liste, ham)}
+    sonuc = {m: int(kesirli[m]) for m in liste}
+    kalan = toplam - sum(sonuc.values())
+    if kalan > 0:
+        sirali = sorted(liste, key=lambda m: (kesirli[m] - sonuc[m]), reverse=True)
+        for i in range(kalan):
+            sonuc[sirali[i % len(sirali)]] += 1
+    if toplam >= taban * len(liste):
+        eksik = [m for m in liste if sonuc[m] < taban]
+        for mikro in eksik:
+            acik = taban - sonuc[mikro]
+            verenler = sorted(
+                (m for m in liste if sonuc[m] > taban),
+                key=lambda m: sonuc[m],
+                reverse=True,
+            )
+            for veren in verenler:
+                if acik <= 0:
+                    break
+                fazla = min(acik, sonuc[veren] - taban)
+                sonuc[veren] -= fazla
+                sonuc[mikro] += fazla
+                acik -= fazla
+    return sonuc
+
+
+def _ders_oturumlari(conn, ogrenci_id, ders=None, mikro_konu=None,
+                     alt_konu=None):
     sorgu = (
         "SELECT gercek_sure_dk, cozulen_soru FROM calisma_oturumlari"
         " WHERE ogrenci_id = ? AND durum = ? AND gercek_sure_dk > 0"
@@ -548,6 +616,9 @@ def _ders_oturumlari(conn, ogrenci_id, ders=None, mikro_konu=None):
     if mikro_konu:
         sorgu += " AND mikro_konu = ?"
         params.append(mikro_konu)
+    if alt_konu:
+        sorgu += " AND alt_konu = ?"
+        params.append(alt_konu)
     return conn.execute(sorgu, tuple(params)).fetchall()
 
 
@@ -578,14 +649,20 @@ def ogrenci_soru_hizi(ogrenci_id, ders):
     return round(hiz, 2)
 
 
-def konu_suresi_medyani(ogrenci_id, ders, mikro_konu):
-    """Aynı ders+mikro konuda en az 3 geçerli oturum varsa medyan süre (dk)."""
+def konu_suresi_medyani(ogrenci_id, ders, mikro_konu, alt_konu=None):
+    """Aynı ders+mikro konuda en az 3 geçerli oturum varsa medyan süre (dk).
+
+    FAZ 5D: `alt_konu` verilirse medyan MİKRO KONU (alt başlık) bazında
+    hesaplanır; böylece ana konunun bir alt başlığındaki gerçek süre diğer
+    alt başlıklara uygulanmaz. Verilmezse davranış eskisiyle aynıdır.
+    """
     if not ogrenci_id or not (ders and mikro_konu):
         return None
     try:
         with _baglanti() as conn:
             satirlar = _ders_oturumlari(
-                conn, int(ogrenci_id), ders=ders, mikro_konu=mikro_konu
+                conn, int(ogrenci_id), ders=ders, mikro_konu=mikro_konu,
+                alt_konu=alt_konu,
             )
     except (sqlite3.Error, ValueError):
         return None
@@ -628,6 +705,8 @@ def sure_plani(
     pedagoji_turu=None,
     makro_konu=None,
     gorev_turu="anlatim",
+    alt_konu=None,
+    konu_suresi_dk=None,
 ):
     """Görevin PLANLANAN süre dökümü (dk).
 
@@ -657,7 +736,9 @@ def sure_plani(
     if ADIM_TEKRAR in turler:
         ogrenme = 20  # tekrar görevi: notları gözden geçirme
     elif ADIM_IZLE in turler:
-        ogrenme = konu_anlatim_dk(mikro_konu, alt_sayisi, konu_sureleri)
+        ogrenme = konu_anlatim_dk(
+            mikro_konu, alt_sayisi, konu_sureleri, konu_suresi_dk
+        )
     not_dk = NOT_SURESI_DK if ADIM_NOT in turler else 0
 
     hiz = ogrenci_soru_hizi(ogrenci_id, ders)
@@ -670,7 +751,7 @@ def sure_plani(
 
     ham = ogrenme + not_dk + soru_dk
     kaynak = "varsayilan"
-    medyan = konu_suresi_medyani(ogrenci_id, ders, mikro_konu)
+    medyan = konu_suresi_medyani(ogrenci_id, ders, mikro_konu, alt_konu)
     if medyan and ham > 0:
         oran = max(0.5, min(2.0, float(medyan) / float(ham)))
         if ogrenme > 0:
@@ -694,7 +775,12 @@ def sure_plani(
 
 def gorev_suresi_hesapla(gorev, ogrenci_id=None, konu_sureleri=None, alt_sayisi=1,
                          adimlar=None):
-    """Görev sözlüğü için planlanan süre (kısayol)."""
+    """Görev sözlüğü için planlanan süre (kısayol).
+
+    FAZ 5D: görev sözlüğünde `konu_suresi_dk` varsa (ana konu süresi mikro
+    konulara paylaştırılmışsa) o mikro konunun kendi anlatım süresi kullanılır;
+    `alt_konu` varsa gerçek süre medyanı mikro konu bazında okunur.
+    """
     gorev = gorev or {}
     return sure_plani(
         ders=gorev.get("ders"),
@@ -707,6 +793,8 @@ def gorev_suresi_hesapla(gorev, ogrenci_id=None, konu_sureleri=None, alt_sayisi=
         pedagoji_turu=gorev.get("pedagoji_turu"),
         makro_konu=gorev.get("makro_konu"),
         gorev_turu=gorev.get("gorev_turu") or "anlatim",
+        alt_konu=gorev.get("alt_konu"),
+        konu_suresi_dk=gorev.get("konu_suresi_dk"),
     )
 
 

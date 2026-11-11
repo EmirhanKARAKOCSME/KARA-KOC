@@ -4316,11 +4316,13 @@ def akilli_program_motoru_v2_gorevleri(
                     for a in alts:
                         if (d, mi, a) in sim_alt:
                             continue
+                        # FAZ 5D: her görev TEK mikro konu içerir; alt başlıklar
+                        # birleştirilmez. Sıradaki mikro konular sonraki günlere
+                        # (gerekirse sonraki haftaya) kalır.
                         paket.append(a)
                         paket_dk += nano_dk
                         sim_alt.add((d, mi, a))
-                        if len(paket) >= 3 or paket_dk >= 30:
-                            break
+                        break
                     mikro_bitti = all((d, mi, a) in sim_alt for a in alts)
                     per_nano = max(5, int(round(hedef / float(len(alts)) / 5.0) * 5))
                     soru = max(5, min(slot_soru, per_nano * len(paket), hedef))
@@ -4329,7 +4331,7 @@ def akilli_program_motoru_v2_gorevleri(
                     )
                     ogrenme_dk = paket_dk
                     bas = (
-                        f"📌 {mi} — bugünün alt başlıkları: {liste_str}. "
+                        f"📌 {mi} ➔ mikro konu: {liste_str}. "
                         "Konu anlatımını izle ve 3-4 satır not çıkar; "
                     )
                     son_not = (
@@ -4494,9 +4496,25 @@ def eski_program_motoru_gorevleri(
 
 
 def _gorevleri_zenginlestir(gorevler, ogrenci_id):
-    """FAZ 5B: her göreve alt adımlar (checklist) ve planlanan süre ekler."""
+    """FAZ 5B/5D: görevleri MİKRO KONU bazında böler; checklist + süre ekler.
+
+    FAZ 5D: Fallback motorları (alt başlık / soru kotalı / temel) ana konu
+    seviyesinde görev üretse bile buradan geçen her görev tek mikro konuya
+    ayrılır. Böylece hangi motor çalışırsa çalışsın hiyerarşi aynıdır:
+    ders → ana konu → mikro konu → checklist. Bölme idempotenttir; zaten tek
+    mikro konu içeren görev olduğu gibi kalır.
+    """
+    try:
+        tamamlanan_altlar = alt_durumlari_yukle(ogrenci_id)
+    except Exception:  # noqa: BLE001 - tablo yoksa bölme yine çalışır
+        tamamlanan_altlar = set()
     sonuc = []
-    for gorev in gorevler or []:
+    for gorev in planner.mikro_gorevlere_ayir(
+        gorevler or [],
+        MIKRO_ALT_KONULAR,
+        KONU_SURELERI_DK,
+        tamamlanan_altlar=tamamlanan_altlar,
+    ):
         alt_sayisi = 1
         alt = gorev.get("alt_konu")
         if alt:
@@ -4529,6 +4547,31 @@ def _gercek_cozulen_haritasi(ogrenci_id):
     for ders, mikro, soru in satirlar:
         if mikro:
             sonuc[(ders, mikro)] = int(soru or 0)
+    return sonuc
+
+
+def _gercek_mikro_cozulen_haritasi(ogrenci_id):
+    """(ders, ana konu, MİKRO KONU) bazında gerçek çözülen soru.
+
+    FAZ 5D: oturumlar `mikro_konu` (ana konu) + `alt_konu` (mikro konu) saklar.
+    Böylece bir mikro konunun ilerlemesi diğerlerine yazılmaz.
+    """
+    sonuc = {}
+    try:
+        with get_connection() as conn:
+            satirlar = conn.execute(
+                "SELECT COALESCE(ders, 'Diğer') AS ders, mikro_konu, alt_konu,"
+                " COALESCE(SUM(cozulen_soru), 0) AS soru"
+                " FROM calisma_oturumlari WHERE ogrenci_id = ? AND durum = ?"
+                " AND alt_konu IS NOT NULL AND TRIM(alt_konu) <> ''"
+                " GROUP BY COALESCE(ders, 'Diğer'), mikro_konu, alt_konu",
+                (ogrenci_id, "Tamamlandı"),
+            ).fetchall()
+    except Exception:  # noqa: BLE001 - tablo yoksa boş harita
+        return sonuc
+    for ders, mikro, alt, soru in satirlar:
+        if ders and mikro and alt:
+            sonuc[(ders, mikro, alt)] = int(soru or 0)
     return sonuc
 
 
@@ -4590,6 +4633,7 @@ def planlama_baglami_olustur(ogrenci_id, aktif_mufredat, alarmlar_db,
         "mikro_alt": MIKRO_ALT_KONULAR,
         "bilinen_mikro": set(durum["bilinen_mikro"]),
         "gercek_cozulen": _gercek_cozulen_haritasi(ogrenci_id),
+        "mikro_cozulen": _gercek_mikro_cozulen_haritasi(ogrenci_id),
         "onceki_gorevler": _planlama_onceki_gorevler(ogrenci_id),
         "paragraf_soru": max(10, int(paragraf_soru or 20)),
         "pedagoji": pedagoji,

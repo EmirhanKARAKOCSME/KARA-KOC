@@ -1,0 +1,167 @@
+{
+  "senaryo": {
+    "baslangic": "2026-11-09",
+    "musaitlik": {
+      "1": 240,
+      "2": 240,
+      "3": 240,
+      "4": 240,
+      "5": 240,
+      "6": 300,
+      "7": 300
+    },
+    "bilinen_mikro": [
+      "Fonksiyonlar",
+      "Çarpanlara Ayırma"
+    ]
+  },
+  "ana_konu": "Polinomlar ve Çarpanlara Ayırma",
+  "soru_hedefi": 17,
+  "gorevler": [
+    {
+      "tarih": "2026-11-09",
+      "ders": "AYT Matematik",
+      "makro_konu": "İleri Cebir ve Fonksiyonlar",
+      "mikro_konu": "Polinomlar ve Çarpanlara Ayırma",
+      "alt_konu": "Polinom tanımı, derece, katsayılar toplamı",
+      "hedef_soru": 4,
+      "tahmini_sure_dk": 94,
+      "pedagoji_turu": "Pekiştirme",
+      "gorev_turu": "anlatim",
+      "gorev_tanimi": "📌 Polinomlar ve Çarpanlara Ayırma ➔ Polinom tanımı, derece, katsayılar toplamı: konu anlatımını izle ve kısa özet çıkar, ardından 4 soru çöz.",
+      "adimlar": [
+        {
+          "baslik": "Konu anlatım videosunu izle.",
+          "adim_turu": "izle",
+          "hedef_soru": 0
+        },
+        {
+          "baslik": "3-4 satırlık kısa not çıkar.",
+          "adim_turu": "not",
+          "hedef_soru": 0
+        },
+        {
+          "baslik": "4 soru çöz.",
+          "adim_turu": "soru",
+          "hedef_soru": 4
+        }
+      ]
+    },
+    {
+      "tarih": "2026-11-10",
+      "ders": "AYT Matematik",
+      "makro_konu": "İleri Cebir ve Fonksiyonlar",
+      "mikro_konu": "Polinomlar ve Çarpanlara Ayırma",
+      "alt_konu": "Polinomlarda dört işlem",
+      "hedef_soru": 4,
+      "tahmini_sure_dk": 94,
+      "pedagoji_turu": "Pekiştirme",
+      "gorev_turu": "anlatim",
+      "gorev_tanimi": "📌 Polinomlar ve Çarpanlara Ayırma ➔ Polinomlarda dört işlem: konu anlatımını izle ve kısa özet çıkar, ardından 4 soru çöz.",
+      "adimlar": [
+        {
+          "baslik": "Konu anlatım videosunu izle.",
+          "adim_turu": "izle",
+          "hedef_soru": 0
+        },
+        {
+          "baslik": "3-4 satırlık kısa not çıkar.",
+          "adim_turu": "not",
+          "hedef_soru": 0
+        },
+        {
+          "baslik": "4 soru çöz.",
+          "adim_turu": "soru",
+          "hedef_soru": 4
+        }
+      ]
+    },
+    {
+      "tarih": "2026-11-11",
+      "ders": "AYT Matematik",
+      "makro_konu": "İleri Cebir ve Fonksiyonlar",
+      "mikro_konu": "Polinomlar ve Çarpanlara Ayırma",
+      "alt_konu": "Bölme algoritması ve kalan teoremi",
+      "hedef_soru": 3,
+      "tahmini_sure_dk": 92,
+      "pedagoji_turu": "Pekiştirme",
+      "gorev_turu": "anlatim",
+      "gorev_tanimi": "📌 Polinomlar ve Çarpanlara Ayırma ➔ Bölme algoritması ve kalan teoremi: konu anlatımını izle ve kısa özet çıkar, ardından 3 soru çöz.",
+      "adimlar": [
+        {
+          "baslik": "Konu anlatım videosunu izle.",
+          "adim_turu": "izle",
+          "hedef_soru": 0
+        },
+        {
+          "baslik": "3-4 satırlık kısa not çıkar.",
+          "adim_turu": "not",
+          "hedef_soru": 0
+        },
+        {
+          "baslik": "3 soru çöz.",
+          "adim_turu": "soru",
+          "hedef_soru": 3
+        }
+      ]
+    },
+    {
+      "tarih": "2026-11-12",
+      "ders": "AYT Matematik",
+      "makro_konu": "İleri Cebir ve Fonksiyonlar",
+      "mikro_konu": "Polinomlar ve Çarpanlara Ayırma",
+      "alt_konu": "Kök-katsayı ilişkileri",
+      "hedef_soru": 3,
+      "tahmini_sure_dk": 92,
+      "pedagoji_turu": "Pekiştirme",
+      "gorev_turu": "anlatim",
+      "gorev_tanimi": "📌 Polinomlar ve Çarpanlara Ayırma ➔ Kök-katsayı ilişkileri: konu anlatımını izle ve kısa özet çıkar, ardından 3 soru çöz.",
+      "adimlar": [
+        {
+          "baslik": "Konu anlatım videosunu izle.",
+          "adim_turu": "izle",
+          "hedef_soru": 0
+        },
+        {
+          "baslik": "3-4 satırlık kısa not çıkar.",
+          "adim_turu": "not",
+          "hedef_soru": 0
+        },
+        {
+          "baslik": "3 soru çöz.",
+          "adim_turu": "soru",
+          "hedef_soru": 3
+        }
+      ]
+    },
+    {
+      "tarih": "2026-11-13",
+      "ders": "AYT Matematik",
+      "makro_konu": "İleri Cebir ve Fonksiyonlar",
+      "mikro_konu": "Polinomlar ve Çarpanlara Ayırma",
+      "alt_konu": "Çarpanlara ayırma yöntemleri",
+      "hedef_soru": 3,
+      "tahmini_sure_dk": 92,
+      "pedagoji_turu": "Pekiştirme",
+      "gorev_turu": "anlatim",
+      "gorev_tanimi": "📌 Polinomlar ve Çarpanlara Ayırma ➔ Çarpanlara ayırma yöntemleri: konu anlatımını izle ve kısa özet çıkar, ardından 3 soru çöz.",
+      "adimlar": [
+        {
+          "baslik": "Konu anlatım videosunu izle.",
+          "adim_turu": "izle",
+          "hedef_soru": 0
+        },
+        {
+          "baslik": "3-4 satırlık kısa not çıkar.",
+          "adim_turu": "not",
+          "hedef_soru": 0
+        },
+        {
+          "baslik": "3 soru çöz.",
+          "adim_turu": "soru",
+          "hedef_soru": 3
+        }
+      ]
+    }
+  ]
+}
