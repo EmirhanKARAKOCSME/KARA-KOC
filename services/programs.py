@@ -227,6 +227,9 @@ _GOREV_EK_KOLONLAR = (
     ("program_id", "INTEGER"),
     ("tahmini_sure_dk", "INTEGER"),
     ("kaynak_gorev_id", "INTEGER"),
+    # FAZ 6C: kaynağı (tekrar kaydı / yanlış soru) çözülen veya arşivlenen
+    # görev SİLİNMEZ; yalnızca geçersiz olarak işaretlenir (geçmiş korunur).
+    ("gecersiz", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 _SEMA_DEVIR = """
@@ -361,6 +364,9 @@ def _gorev_normallestir(gorev, sira=1):
     adimlar = gorev.get("adimlar") or []
     if not isinstance(adimlar, (list, tuple)):
         raise ProgramHatasi("%d. görevin alt adımları liste olmalıdır." % sira)
+    # FAZ 6C: görevin beslendiği kaynaklar (tekrar kaydı / yanlış soru).
+    # Zorunlu değildir; yoksa eski davranış aynen korunur.
+    kaynaklar = _kaynaklari_normallestir(gorev.get("kaynaklar"), sira)
     return {
         "gun": _metin(gorev.get("gun")) or gun_adi(tarih),
         "ders": ders,
@@ -376,7 +382,27 @@ def _gorev_normallestir(gorev, sira=1):
         "tarih": tarih,
         "kaynak_gorev_id": kaynak,
         "adimlar": list(adimlar),
+        "kaynaklar": kaynaklar,
     }
+
+
+def _kaynaklari_normallestir(kaynaklar, sira=1):
+    """FAZ 6C: `[{'tur': 'tekrar_kaydi'|'yanlis_soru', 'id': N}, ...]`.
+
+    Boş / verilmemiş kaynak listesi boş liste döner (eski davranış korunur).
+    """
+    if kaynaklar in (None, ""):
+        return []
+    if not isinstance(kaynaklar, (list, tuple)):
+        raise ProgramHatasi("%d. görevin kaynakları liste olmalıdır." % sira)
+    try:
+        from services import gorev_kaynaklari
+    except ImportError:  # FAZ 6C modülü yoksa bağ yazılmaz
+        return []
+    try:
+        return gorev_kaynaklari._kaynak_normallestir(kaynaklar)
+    except Exception as hata:  # noqa: BLE001
+        raise ProgramHatasi("%d. görevin kaynakları geçersiz: %s" % (sira, hata))
 
 
 def _butunluk_dogrula(conn, program_id, ogrenci_id, adet):
@@ -554,7 +580,30 @@ def _gorev_yaz(conn, ogrenci_id, program_id, gorev, zaman, an):
             task_steps = None
         if task_steps is not None:
             task_steps.adimlari_kaydet(yeni_id, adimlar, conn=conn, an=an)
+    # FAZ 6C: görev <-> kaynak (tekrar kaydı / yanlış soru) bağları.
+    # Aynı transaction içinde yazılır; modül yoksa sessizce atlanır.
+    kaynaklar = gorev.get("kaynaklar") or []
+    if kaynaklar:
+        try:
+            from services import gorev_kaynaklari
+        except ImportError:  # FAZ 6C modülü henüz yok
+            gorev_kaynaklari = None
+        if gorev_kaynaklari is not None:
+            gorev_kaynaklari.kaynaklari_yaz(
+                conn, ogrenci_id, program_id, yeni_id, kaynaklar, an=an
+            )
     return yeni_id
+
+
+def _gecersiz_kolonu_var(conn):
+    """`gecersiz` kolonu var mı? (eski veritabanlarıyla uyum için)"""
+    try:
+        return any(
+            satir[1] == "gecersiz"
+            for satir in conn.execute("PRAGMA table_info(calisma_programi_gorevler)")
+        )
+    except sqlite3.Error:
+        return False
 
 
 # ==============================================================================
@@ -613,7 +662,7 @@ def program_gorevleri(program_id, sadece_tarih=None):
     return [dict(s) for s in satirlar]
 
 
-def _legacy_gorevler(conn, ogrenci_id, tarih=None):
+def _legacy_gorevler(conn, ogrenci_id, tarih=None, gecerli=""):
     sorgu = (
         "SELECT * FROM calisma_programi_gorevler"
         " WHERE ogrenci_id = ? AND program_id IS NULL"
@@ -622,6 +671,7 @@ def _legacy_gorevler(conn, ogrenci_id, tarih=None):
     if tarih:
         sorgu += " AND tarih = ?"
         params.append(tarih)
+    sorgu += gecerli
     sorgu += " ORDER BY tarih ASC, id ASC"
     return [dict(s) for s in conn.execute(sorgu, tuple(params)).fetchall()]
 
@@ -632,22 +682,27 @@ def gun_gorevleri(ogrenci_id, tarih=None):
     Eski haftaların aynı gün adına ait görevleri asla bugüne karışmaz:
     gün adı (`gun`) yerine yalnızca tam tarih kullanılır. Aktif program varsa
     yalnızca onun görevleri döner; yoksa program bağlantısı olmayan eski
-    kayıtlar (yalnızca o güne ait olanlar) döner.
+    kayıtlar (yalnızca o güne ait olanlar) döner. FAZ 6C: kaynağı kapanmış
+    (`gecersiz = 1`) görevler listelenmez.
     """
     oid = _ogrenci_dogrula(ogrenci_id)
     gun = _tarih_dogrula(tarih, "Gün") if tarih else bugun().isoformat()
     with _baglanti() as conn:
+        gecerli = (
+            " AND IFNULL(gecersiz, 0) = 0" if _gecersiz_kolonu_var(conn) else ""
+        )
         aktif = conn.execute(
             "SELECT id FROM calisma_programlari WHERE ogrenci_id = ? AND durum = ?"
             " ORDER BY id DESC LIMIT 1",
             (oid, DURUM_AKTIF),
         ).fetchone()
         if aktif is None:
-            return _legacy_gorevler(conn, oid, gun)
+            return _legacy_gorevler(conn, oid, gun, gecerli)
         satirlar = conn.execute(
             "SELECT * FROM calisma_programi_gorevler"
             " WHERE ogrenci_id = ? AND tarih = ? AND program_id = ?"
-            " ORDER BY id ASC",
+            + gecerli
+            + " ORDER BY id ASC",
             (oid, gun, aktif["id"]),
         ).fetchall()
     return [dict(s) for s in satirlar]
@@ -657,16 +712,20 @@ def gorunur_gorevler(ogrenci_id):
     """Haftalık çizelgede gösterilecek görevler (aktif program veya eski kayıtlar)."""
     oid = _ogrenci_dogrula(ogrenci_id)
     with _baglanti() as conn:
+        gecerli = (
+            " AND IFNULL(gecersiz, 0) = 0" if _gecersiz_kolonu_var(conn) else ""
+        )
         aktif = conn.execute(
             "SELECT id FROM calisma_programlari WHERE ogrenci_id = ? AND durum = ?"
             " ORDER BY id DESC LIMIT 1",
             (oid, DURUM_AKTIF),
         ).fetchone()
         if aktif is None:
-            return _legacy_gorevler(conn, oid)
+            return _legacy_gorevler(conn, oid, None, gecerli)
         satirlar = conn.execute(
             "SELECT * FROM calisma_programi_gorevler WHERE program_id = ?"
-            " ORDER BY tarih ASC, id ASC",
+            + gecerli
+            + " ORDER BY tarih ASC, id ASC",
             (aktif["id"],),
         ).fetchall()
     return [dict(s) for s in satirlar]

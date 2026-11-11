@@ -487,12 +487,31 @@ def _tekrarlari_planla(gorev_id, an=None):
         return []
 
 
+def _kaynaklari_ilerlet(gorev_id, an=None):
+    """FAZ 6C köprüsü: görevin bağlı kaynaklarını (defter/tekrar) ilerletir.
+
+    Görev tamamlanınca bağlı yanlış soru kayıtları `tekrar_edildi`, bağlı
+    aralıklı tekrar kayıtları `tekrar_tamamla` ile kapanır. Köprü hatası görev
+    işaretini bozmaz.
+    """
+    try:
+        from services import gorev_kaynaklari
+    except ImportError:  # pragma: no cover - FAZ 6C modülü yoksa sessiz geç
+        return {}
+    try:
+        return gorev_kaynaklari.gorev_tamamlandi(gorev_id, an=an)
+    except Exception:  # pragma: no cover - köprü hatası görev durumunu bozmaz
+        return {}
+
+
 def gorev_durum_guncelle(gorev_id, an=None):
     """Görev `durum` alanını alt adımlardan türetir (adım yoksa dokunmaz).
 
     FAZ 6A: aralıklı tekrar yalnızca tamamlanmamış -> tamamlanmış (0 -> 1)
     geçişinde planlanır. Böylece sayfa yenilemesi, yeniden kaydetme veya
     geçmişte tamamlanmış görevler mükerrer/geriye dönük tekrar üretmez.
+    FAZ 6C: aynı geçişte görevin bağlı kaynakları (yanlış soru defteri /
+    bekleyen tekrar kaydı) ilerletilir.
     """
     tamam = gorev_tamam_mi(gorev_id)
     # FAZ 5D: mikro konu ilerlemesi günlük görev durumundan BAĞIMSIZDIR; her
@@ -520,6 +539,7 @@ def gorev_durum_guncelle(gorev_id, an=None):
                 (1 if tamam else 0, gid),
             )
     if tamam and onceki == 0:
+        _kaynaklari_ilerlet(gid, an)
         _tekrarlari_planla(gid, an)
     return bool(tamam)
 

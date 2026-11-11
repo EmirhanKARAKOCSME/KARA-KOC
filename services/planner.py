@@ -33,6 +33,14 @@ from datetime import date, datetime, timedelta, timezone
 
 from services import task_steps
 
+try:  # FAZ 6C köprüsü (modül yoksa planlama aynen çalışır)
+    from services import gorev_kaynaklari
+except ImportError:  # pragma: no cover
+    gorev_kaynaklari = None
+
+KAYNAK_TEKRAR = getattr(gorev_kaynaklari, "KAYNAK_TEKRAR", "tekrar_kaydi")
+KAYNAK_YANLIS = getattr(gorev_kaynaklari, "KAYNAK_YANLIS", "yanlis_soru")
+
 TR_TZ = timezone(timedelta(hours=3))
 
 GUN_SAYISI = 7
@@ -46,6 +54,13 @@ TEKRAR_DAKIKA = 20
 KREDI_MAKS = 100.0
 SORU_CARPANI = 3.0  # toplam soru hedefi = 100 x 3 x normalize kredi
 VARSAYILAN_DB_YOLU = "yks_veritabani.db"
+
+# FAZ 6C: aralıklı tekrar + yanlış soru defteri entegrasyonu.
+MAKS_TEKRAR_GOREV_GUN = 2  # günde en fazla 2 tekrar/defter görevi
+MAKS_TEKRAR_SORU = 10  # tek görevde en fazla 10 kaynak soru
+TEKRAR_DK_PAYI = 0.30  # günün kapasitesinin en fazla %30'u tekrara ayrılır
+MIN_TEKRAR_DK = 15  # tekrar için ayrılacak en az süre (kapasite izin verirse)
+TEKRAR_HEDEF_SORU = 5  # bir aralıklı tekrar kaydının soru hedefi
 
 GUN_ADLARI = (
     "Pazartesi",
@@ -541,6 +556,7 @@ def _gorev_uret(
     alt_sayisi=None,
     sure_dk=None,
     mikro_hedef=None,
+    kaynaklar=None,
 ):
     """Görev sözlüğü + alt adımlar + planlanan süre.
 
@@ -549,11 +565,20 @@ def _gorev_uret(
     anlatım süresi kullanılır (ana konu süresi mikro konulara paylaştırılmıştır).
     `mikro_hedef` mikro konunun TAM soru hedefidir; günlük görev bu hedefin
     yalnızca bir parçasını içerebilir.
+    FAZ 6C: `kaynaklar` görevin beslendiği kayıtları taşır
+    (`[{'tur': 'yanlis_soru'|'tekrar_kaydi', 'id': N}]`); görev tamamlanınca
+    bağlı kayıtlar ilerletilir.
     """
     etiket = "%s ➔ %s" % (mikro, alt_konu) if alt_konu else mikro
     if tur == "tekrar":
         tanim = "🔄 %s: özet notlarını oku, hatırlatma sorularını çöz." % etiket
-        soru = min(5, max(0, int(soru or 5)))
+        soru = min(TEKRAR_HEDEF_SORU, max(0, int(soru or TEKRAR_HEDEF_SORU)))
+        pedagoji = "Tekrar"
+    elif tur == "yanlis":
+        tanim = "🎯 %s: yanlış soru defterindeki %d soruyu yeniden çöz." % (
+            etiket,
+            soru,
+        )
         pedagoji = "Tekrar"
     elif tur == "devir":
         tanim = "➡️ %s: geçen programdan kalan %d soruyu çöz." % (etiket, soru)
@@ -581,6 +606,8 @@ def _gorev_uret(
         "tarih": tarih.isoformat(),
         "kaynak_gorev_id": kaynak_gorev_id,
     }
+    if kaynaklar:
+        gorev["kaynaklar"] = list(kaynaklar)
     gorev["mikro_hedef_soru"] = int(mikro_hedef or gorev["hedef_soru"] or 0)
     if sure_dk not in (None, "", 0):
         gorev["konu_suresi_dk"] = int(sure_dk)
@@ -598,6 +625,171 @@ def _gorev_uret(
     )
 
 
+
+
+def _tekrar_dk_limiti(kapasite):
+    """FAZ 6C: bir günde tekrar/defter görevlerine ayrılabilecek dakika."""
+    kapasite = int(kapasite or 0)
+    if kapasite <= 0:
+        return 0
+    limiti = int(kapasite * TEKRAR_DK_PAYI)
+    if limiti < MIN_TEKRAR_DK and kapasite >= 2 * MIN_TEKRAR_DK:
+        limiti = MIN_TEKRAR_DK
+    return max(0, min(kapasite, limiti))
+
+
+def tekrar_havuzu(ogrenci_id, gun=None, bitis=None):
+    """FAZ 6C: haftaya beslenecek tekrar kaynaklarını toplar.
+
+    Dönen sözlük:
+        `yanlis_sorular`     -> `wrong_questions.bekleyen_yanlis_sorular`
+        `bekleyen_tekrarlar` -> `spaced_repetition.tekrar_listesi(Bekliyor)`
+
+    Servisler yoksa veya hata verirse ilgili havuz boş döner; planlama
+    bozulmaz. `gun`/`bitis` haftalık pencereyi belirler (gecikenler dahildir).
+    """
+    havuz = {"yanlis_sorular": [], "bekleyen_tekrarlar": []}
+    if ogrenci_id in (None, "", 0):
+        return havuz
+    try:
+        from services import wrong_questions
+    except ImportError:  # pragma: no cover - modül yoksa entegrasyon kapalı
+        wrong_questions = None
+    if wrong_questions is not None:
+        try:
+            havuz["yanlis_sorular"] = wrong_questions.bekleyen_yanlis_sorular(
+                ogrenci_id, gun=gun, bitis=bitis
+            )
+        except Exception:  # pragma: no cover - defter hatası planı bozmaz
+            havuz["yanlis_sorular"] = []
+    try:
+        from services import spaced_repetition
+    except ImportError:  # pragma: no cover
+        spaced_repetition = None
+    if spaced_repetition is not None:
+        try:
+            havuz["bekleyen_tekrarlar"] = spaced_repetition.tekrar_listesi(
+                ogrenci_id,
+                durum=spaced_repetition.DURUM_BEKLIYOR,
+                baslangic=gun,
+                bitis=bitis,
+            )
+        except Exception:  # pragma: no cover
+            havuz["bekleyen_tekrarlar"] = []
+    return havuz
+
+
+def _tekrar_olusturma_tarihi(kayit):
+    """Tekrar kaydının oluşma günü (`YYYY-MM-DD`) veya None."""
+    metin = str(kayit.get("olusturma_zamani") or kayit.get("tarih") or "").strip()
+    return metin[:10] if len(metin) >= 10 else None
+
+
+def _pencere_ici_tekrar_mi(kayit, bas):
+    """FAZ 6C: tekrar kaydı bu plan penceresinde mi oluştu?
+
+    Öğrenme görevi bu pencerede tamamlandıysa aralıklı tekrarı SONRAKİ plana
+    bırakılır; böylece aynı mikro konu aynı haftada hem öğrenme hem tekrar
+    görevi olarak iki kez yer almaz (FAZ 5D kuralı korunur). Kayıt beklemede
+    kalır, sonraki hafta gecikmiş olarak havuza girer.
+    """
+    tarih = _tekrar_olusturma_tarihi(kayit)
+    if not tarih or bas is None:
+        return False
+    return tarih >= bas.isoformat()
+
+
+def _tekrar_havuzunu_suz(havuz, bas):
+    """Havuzdaki pencere içi tekrar kayıtlarını çıkarır (yanlış sorular kalır)."""
+    if not isinstance(havuz, dict):
+        return havuz
+    temiz = dict(havuz)
+    temiz["bekleyen_tekrarlar"] = [
+        kayit
+        for kayit in (havuz.get("bekleyen_tekrarlar") or [])
+        if not _pencere_ici_tekrar_mi(kayit, bas)
+    ]
+    return temiz
+
+
+def _tekrar_en_erken(kayit):
+    """Tekrar görevinin yerleşebileceği en erken gün (`YYYY-MM-DD`) veya None."""
+    try:
+        return _tarih_oku(kayit.get("planlanan_tarih")).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _tekrar_gruplari(havuz, mufredat):
+    """FAZ 6C havuzunu (ders, ana konu, mikro konu) bazında gruplar.
+
+    Dönen liste:
+        `[(ders, makro, ana, alt, yanlis_idler, tekrar_planlari), ...]`
+    `tekrar_planlari` her bekleyen tekrar için `{'id', 'en_erken'}` taşır;
+    `en_erken` tekrarın planlanan tarihidir (görev bu tarihten önce yerleşmez).
+    Sıralama gecikmiş kayıtları önceleyecek biçimde deterministiktir.
+    """
+    gruplar = {}
+    sira = {}
+
+    def _grup(ders, ana, alt, makro):
+        anahtar = (ders, ana, alt)
+        if anahtar not in gruplar:
+            gruplar[anahtar] = {
+                "ders": ders,
+                "ana": ana,
+                "alt": alt,
+                "makro": makro or _makro_bul(mufredat, ders, ana),
+                "yanlis": [],
+                "tekrar": [],
+            }
+            sira[anahtar] = len(sira)
+        elif makro and not gruplar[anahtar]["makro"]:
+            gruplar[anahtar]["makro"] = makro
+        return gruplar[anahtar]
+
+    for soru in (havuz or {}).get("yanlis_sorular") or []:
+        ders = (soru.get("ders") or "").strip()
+        ana = (soru.get("mikro_konu") or "").strip()
+        if not (ders and ana):
+            continue
+        grup = _grup(ders, ana, _tek_alt(soru.get("alt_konu")), soru.get("makro_konu"))
+        grup["yanlis"].append(int(soru["id"]))
+
+    for tekrar in (havuz or {}).get("bekleyen_tekrarlar") or []:
+        ders = (tekrar.get("ders") or "").strip()
+        ana = (tekrar.get("mikro_konu") or "").strip()
+        if not (ders and ana):
+            continue
+        grup = _grup(
+            ders, ana, _tek_alt(tekrar.get("alt_konu")), tekrar.get("makro_konu")
+        )
+        grup["tekrar"].append(
+            {
+                "id": int(tekrar["id"]),
+                "en_erken": _tekrar_en_erken(tekrar),
+            }
+        )
+
+    siralanmis = sorted(
+        gruplar.items(),
+        key=lambda cift: (
+            0 if cift[1]["yanlis"] else 1,
+            -len(cift[1]["yanlis"]) - len(cift[1]["tekrar"]),
+            sira[cift[0]],
+        ),
+    )
+    return [
+        (
+            grup["ders"],
+            grup["makro"],
+            grup["ana"],
+            grup["alt"],
+            grup["yanlis"],
+            grup["tekrar"],
+        )
+        for _anahtar, grup in siralanmis
+    ]
 
 
 def plan_uret(baglam):
@@ -654,14 +846,31 @@ def plan_uret(baglam):
     gun_yeni = {gun: 0 for gun in gunler}
     gun_yeni_ders = {gun: set() for gun in gunler}
     gun_mikro = {gun: set() for gun in gunler}
+    # FAZ 6C: günlük tekrar/defter kotası
+    gun_tekrar = {gun: 0 for gun in gunler}
+    gun_tekrar_dk = {gun: 0 for gun in gunler}
+    gun_konu = {gun: set() for gun in gunler}
     planlanan = set()
     kuyruk = {}
 
     def _kuyruga_ekle(oge):
-        anahtar = (oge["ders"], oge["ana"], oge["mikro"])
+        anahtar = oge.get("anahtar") or (oge["ders"], oge["ana"], oge["mikro"])
         mevcut_oge = kuyruk.get(anahtar)
-        if mevcut_oge is None or oge["oncelik"] < mevcut_oge["oncelik"]:
+        if mevcut_oge is None:
             kuyruk[anahtar] = oge
+            return
+        if oge["oncelik"] < mevcut_oge["oncelik"]:
+            kuyruk[anahtar] = oge
+            return
+        # FAZ 6C: aynı öncelikli kaynaklı görevler (defter) tek görevde birleşir.
+        if oge["oncelik"] == mevcut_oge["oncelik"] and oge.get("kaynaklar"):
+            kaynaklar = mevcut_oge.setdefault("kaynaklar", [])
+            for kaynak in oge["kaynaklar"]:
+                if kaynak not in kaynaklar:
+                    kaynaklar.append(kaynak)
+            mevcut_oge["kalan"] = min(
+                MAKS_TEKRAR_SORU, int(mevcut_oge["kalan"]) + int(oge["kalan"])
+            )
 
     def _kalan_hedef(ders, makro, ana):
         hedef = _mikro_hedef(
@@ -814,6 +1023,41 @@ def plan_uret(baglam):
                 "ana": ana, "mikro": alt, "kalan": pay, "kaynak": None,
                 "pay_dk": None, "mikro_hedef": mikro_hedef,
             })
+
+    # 2b) FAZ 6C: yanlış soru defteri + zamanı gelmiş aralıklı tekrarlar
+    # (devir ve öncelik 2'deki tekrar görevleriyle aynı katman; gecikmiş
+    # kayıtlar en önce yerleşir, sığmayanlar kaynakta bekler -> devir).
+    havuz = baglam.get("tekrar_havuzu")
+    if havuz is None and baglam.get("tekrar_entegrasyonu", True):
+        havuz = tekrar_havuzu(ogrenci_id, gun=bas, bitis=gunler[-1])
+    havuz = _tekrar_havuzunu_suz(havuz, bas)
+    for ders, makro, ana, alt, yanlis_idler, tekrar_planlari in _tekrar_gruplari(
+        havuz or {}, mufredat
+    ):
+        if yanlis_idler:
+            secili = yanlis_idler[:MAKS_TEKRAR_SORU]
+            _kuyruga_ekle({
+                "oncelik": 2, "tur": "yanlis", "ders": ders, "makro": makro,
+                "ana": ana, "mikro": alt, "kalan": len(secili), "kaynak": None,
+                "pay_dk": None,
+                "anahtar": ("defter", ders, ana, alt),
+                "kaynaklar": [
+                    {"tur": KAYNAK_YANLIS, "id": soru_id}
+                    for soru_id in secili
+                ],
+            })
+        for tekrar in tekrar_planlari:
+            tekrar_id = tekrar["id"]
+            _kuyruga_ekle({
+                "oncelik": 2, "tur": "tekrar", "ders": ders, "makro": makro,
+                "ana": ana, "mikro": alt, "kalan": TEKRAR_HEDEF_SORU,
+                "kaynak": None, "pay_dk": None,
+                "anahtar": ("tekrar", tekrar_id),
+                # FAZ 6C: tekrar, planlanan tarihinden önce yerleştirilmez.
+                "en_erken": tekrar.get("en_erken"),
+                "kaynaklar": [{"tur": KAYNAK_TEKRAR, "id": tekrar_id}],
+            })
+
     # ------------------------------------------------------------------
     # YERLEŞTİRME (günlük kapasite asla aşılmaz)
     # ------------------------------------------------------------------
@@ -854,6 +1098,18 @@ def plan_uret(baglam):
             )
             yerlesti = False
             for oge_anahtar, oge in adaylar:
+                tekrar_mi = oge["tur"] in ("tekrar", "yanlis")
+                # FAZ 6C: tekrar görevi planlanan tarihinden önce yerleşmez.
+                if oge.get("en_erken") and tarih.isoformat() < oge["en_erken"]:
+                    continue
+                if tekrar_mi:
+                    # Günlük tekrar kotası: görev sayısı + dakika payı
+                    if gun_tekrar[tarih] >= MAKS_TEKRAR_GOREV_GUN:
+                        continue
+                    if (oge["ders"], oge["ana"], oge["mikro"]) in gun_konu[tarih]:
+                        continue
+                    if gun_tekrar_dk[tarih] >= _tekrar_dk_limiti(kap):
+                        continue
                 if oge_anahtar in gun_mikro[tarih]:
                     continue  # aynı mikro konu aynı gün iki görev olmaz
                 if oge["tur"] == "anlatim":
@@ -870,6 +1126,11 @@ def plan_uret(baglam):
                 pedagoji = pedagoji_map.get(
                     (oge["ders"], oge["ana"]), "Pekiştirme"
                 )
+                kalan_dk_gorev = kalan_dk
+                if tekrar_mi:
+                    kalan_dk_gorev = min(
+                        kalan_dk, _tekrar_dk_limiti(kap) - gun_tekrar_dk[tarih]
+                    )
                 gorev = _soru_sayisi_sigdir(
                     oge["tur"],
                     oge["ders"],
@@ -877,7 +1138,7 @@ def plan_uret(baglam):
                     oge["ana"],
                     tarih,
                     int(hedef_soru or 0),
-                    kalan_dk,
+                    kalan_dk_gorev,
                     oge["kaynak"],
                     ogrenci_id,
                     konu_sureleri,
@@ -886,6 +1147,7 @@ def plan_uret(baglam):
                     alt_sayisi=1,
                     sure_dk=oge.get("pay_dk"),
                     mikro_hedef=oge.get("mikro_hedef"),
+                    kaynaklar=oge.get("kaynaklar"),
                 )
                 if gorev is None:
                     continue
@@ -893,6 +1155,13 @@ def plan_uret(baglam):
                 gun_dk[tarih] += int(gorev.get("tahmini_sure_dk") or 0)
                 gun_mikro[tarih].add(oge_anahtar)
                 planlanan.add(oge_anahtar)
+                if tekrar_mi:
+                    gun_tekrar[tarih] += 1
+                    gun_tekrar_dk[tarih] += int(gorev.get("tahmini_sure_dk") or 0)
+                    gun_konu[tarih].add((oge["ders"], oge["ana"], oge["mikro"]))
+                    kuyruk.pop(oge_anahtar, None)
+                    yerlesti = True
+                    break
                 oge["kalan"] = max(0, oge["kalan"] - int(gorev["hedef_soru"]))
                 if oge["tur"] == "anlatim":
                     gun_yeni[tarih] += 1
@@ -938,13 +1207,17 @@ def plan_uret(baglam):
 def _soru_sayisi_sigdir(
     tur, ders, makro, mikro, tarih, kalan_soru, kalan_dk,
     kaynak, ogrenci_id, konu_sureleri, alt_konu, pedagoji, alt_sayisi=1,
-    sure_dk=None, mikro_hedef=None,
+    sure_dk=None, mikro_hedef=None, kaynaklar=None,
 ):
     """Kalan süreye sığan en büyük soru sayısıyla görevi üretir (yoksa None).
 
     FAZ 5D: mikro konunun hedefi 5'in altındaysa (ana konu kotası mikro
     konulara paylaştırıldığında oluşabilir) hedef küçültülmez; tek küçük blok
     olarak planlanır. Aksi hâlde bloklar 5-10 aralığında kalır.
+
+    FAZ 6C: `kaynaklar` verilirse göreve YALNIZCA gerçekten planlanan soru
+    kadar kaynak bağlanır (kalan kaynaklar defterde bekler, sonraki hafta
+    yeniden havuza girer -> devir otomatiktir).
     """
     adaylar = []
     for soru in (min(MAKS_GOREV_SORU, kalan_soru), 15, 10, 5):
@@ -955,10 +1228,16 @@ def _soru_sayisi_sigdir(
     if not adaylar and 0 < kalan_soru < MIN_ANLAMLI_BLOK:
         adaylar.append(int(kalan_soru))
     for soru in adaylar:
+        secili = None
+        if kaynaklar:
+            secili = list(kaynaklar)[: int(soru)]
+            if not secili:
+                secili = None
         gorev = _gorev_uret(
             tur, ders, makro, mikro, tarih, soru, kaynak, ogrenci_id,
             konu_sureleri, alt_konu=alt_konu, pedagoji=pedagoji,
             alt_sayisi=alt_sayisi, sure_dk=sure_dk, mikro_hedef=mikro_hedef,
+            kaynaklar=secili,
         )
         if int(gorev.get("tahmini_sure_dk") or 0) <= kalan_dk:
             return gorev

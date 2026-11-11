@@ -685,11 +685,64 @@ def tekrar_planla(gorev_id, an=None):
 # ==============================================================================
 # DURUM GEÇİŞLERİ
 # ==============================================================================
+def _kaynak_isi_bitti(tekrar_id, gecersiz_kil=False, an=None):
+    """Görev bağlantısını kapatır (FAZ 6C köprüsü, isteğe bağlı).
+
+    Tekrar kaydı uygulama dışında (ör. tekrar listesinden) tamamlanır veya
+    iptal edilirse, bu kayda bağlı bekleyen program görevleri anlamsız kalır;
+    `gecersiz_kil=True` ile gizlenir (silinmez). Köprü hatası akışı bozmaz.
+    """
+    try:
+        from services import gorev_kaynaklari
+    except ImportError:  # pragma: no cover - FAZ 6C modülü yoksa sessiz geç
+        return 0
+    try:
+        return gorev_kaynaklari.kaynak_isi_bitti(
+            gorev_kaynaklari.KAYNAK_TEKRAR,
+            tekrar_id,
+            gecersiz_kil=gecersiz_kil,
+            an=an,
+        )
+    except Exception:  # noqa: BLE001 - köprü hatası tekrar durumunu bozmaz
+        return 0
+
+
 def tekrar_tamamla(tekrar_id, an=None):
     """Tekrarı tamamlar; GERÇEK tamamlanma zamanını kaydeder.
 
     `planlanan_tarih` değişmez. Zaten tamamlanmışsa kayıt aynen döner
-    (idempotent); iptal edilmiş tekrar tamamlanamaz.
+    (idempotent); iptal edilmiş tekrar tamamlanamaz. FAZ 6C: kayda bağlı
+    bekleyen program görevleri geçersiz kılınır (silinmez).
+    """
+    an = an or simdi()
+    zaman = _zaman_yaz(_an_zamani(an))
+    with _baglanti() as conn:
+        with _islem(conn):
+            kayit = _tekrar_satiri(conn, tekrar_id)
+            if kayit["durum"] == DURUM_IPTAL:
+                raise TekrarHatasi(
+                    "İptal edilmiş tekrar (#%s) tamamlanamaz." % kayit["id"]
+                )
+            if kayit["durum"] != DURUM_TAMAMLANDI:
+                imlec = conn.execute(
+                    "UPDATE tekrar_kayitlari SET durum = ?, tamamlanma_zamani = ?,"
+                    " guncelleme_zamani = ? WHERE id = ? AND durum = ?",
+                    (DURUM_TAMAMLANDI, zaman, zaman, kayit["id"], DURUM_BEKLIYOR),
+                )
+                if imlec.rowcount != 1:
+                    raise TekrarHatasi(
+                        "Tekrar bu sırada başka bir işlemle kapandı; tekrar deneyin."
+                    )
+            sonuc = _tekrar_satiri(conn, kayit["id"])
+    _kaynak_isi_bitti(sonuc["id"], gecersiz_kil=True, an=an)
+    return sonuc
+
+
+def tekrar_iptal(tekrar_id, an=None):
+    """Bekleyen tekrarı iptal eder (silmez; geçmiş korunur).
+
+    FAZ 6C: iptal edilen kayda bağlı bekleyen program görevleri geçersiz
+    kılınır (silinmez).
     """
     an = an or simdi()
     zaman = _zaman_yaz(_an_zamani(an))
@@ -697,43 +750,19 @@ def tekrar_tamamla(tekrar_id, an=None):
         with _islem(conn):
             kayit = _tekrar_satiri(conn, tekrar_id)
             if kayit["durum"] == DURUM_TAMAMLANDI:
-                return kayit
-            if kayit["durum"] == DURUM_IPTAL:
-                raise TekrarHatasi(
-                    "İptal edilmiş tekrar (#%s) tamamlanamaz." % kayit["id"]
-                )
-            imlec = conn.execute(
-                "UPDATE tekrar_kayitlari SET durum = ?, tamamlanma_zamani = ?,"
-                " guncelleme_zamani = ? WHERE id = ? AND durum = ?",
-                (DURUM_TAMAMLANDI, zaman, zaman, kayit["id"], DURUM_BEKLIYOR),
-            )
-            if imlec.rowcount != 1:
-                raise TekrarHatasi(
-                    "Tekrar bu sırada başka bir işlemle kapandı; tekrar deneyin."
-                )
-            return _tekrar_satiri(conn, kayit["id"])
-
-
-def tekrar_iptal(tekrar_id, an=None):
-    """Bekleyen tekrarı iptal eder (silmez; geçmiş korunur)."""
-    an = an or simdi()
-    zaman = _zaman_yaz(_an_zamani(an))
-    with _baglanti() as conn:
-        with _islem(conn):
-            kayit = _tekrar_satiri(conn, tekrar_id)
-            if kayit["durum"] == DURUM_IPTAL:
-                return kayit
-            if kayit["durum"] == DURUM_TAMAMLANDI:
                 raise TekrarHatasi(
                     "Tamamlanmış tekrar (#%s) iptal edilemez." % kayit["id"]
                 )
-            imlec = conn.execute(
-                "UPDATE tekrar_kayitlari SET durum = ?, guncelleme_zamani = ?,"
-                " tamamlanma_zamani = NULL WHERE id = ? AND durum = ?",
-                (DURUM_IPTAL, zaman, kayit["id"], DURUM_BEKLIYOR),
-            )
-            if imlec.rowcount != 1:
-                raise TekrarHatasi(
-                    "Tekrar bu sırada başka bir işlemle kapandı; tekrar deneyin."
+            if kayit["durum"] != DURUM_IPTAL:
+                imlec = conn.execute(
+                    "UPDATE tekrar_kayitlari SET durum = ?, guncelleme_zamani = ?,"
+                    " tamamlanma_zamani = NULL WHERE id = ? AND durum = ?",
+                    (DURUM_IPTAL, zaman, kayit["id"], DURUM_BEKLIYOR),
                 )
-            return _tekrar_satiri(conn, kayit["id"])
+                if imlec.rowcount != 1:
+                    raise TekrarHatasi(
+                        "Tekrar bu sırada başka bir işlemle kapandı; tekrar deneyin."
+                    )
+            sonuc = _tekrar_satiri(conn, kayit["id"])
+    _kaynak_isi_bitti(sonuc["id"], gecersiz_kil=True, an=an)
+    return sonuc
