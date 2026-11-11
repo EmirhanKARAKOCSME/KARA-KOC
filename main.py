@@ -8,6 +8,7 @@ import streamlit as st
 
 from services import study_sessions
 from services import programs as program_service
+from services import task_steps
 
 # ==============================================================================
 # SİSTEM VE ZAMAN DİLİMİ AYARLARI (UTC+3 TÜRKİYE SAATİ)
@@ -229,6 +230,33 @@ st.markdown(
         padding: 16px;
         margin-bottom: 12px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+    /* FAZ 5B: mobil görünüm - kartlar ve checklist dar ekranda taşmaz */
+    .focus-task-card, .sim-card, .alarm-card-info, .alarm-card-warning {
+        box-sizing: border-box;
+        max-width: 100%;
+        overflow-wrap: break-word;
+    }
+    @media (max-width: 640px) {
+        .focus-task-card {
+            padding: 12px;
+            border-radius: 10px;
+        }
+        .focus-task-card h4 {
+            font-size: 1rem;
+            line-height: 1.35;
+        }
+        .focus-task-card p {
+            font-size: 0.92rem;
+        }
+        .focus-task-card span {
+            display: inline-block;
+            margin-top: 6px;
+        }
+        .block-container {
+            padding-left: 0.7rem;
+            padding-right: 0.7rem;
+        }
     }
     </style>
 """,
@@ -1435,6 +1463,9 @@ study_sessions.init_db()
 
 # FAZ 5A: program sürümleme şeması (idempotent; eski görevler korunur).
 program_service.init_db()
+
+# FAZ 5B: mikro görev alt adımları (checklist) şeması.
+task_steps.init_db()
 
 def sanitize_key(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]", "_", str(text))
@@ -3632,8 +3663,8 @@ def akilli_program_motoru_gorevleri(
                     d, m, mi, ped = "TYT Biyoloji", "Kavram Tekrarı", "Özet Not Çalışması", "Ezber"
                 rows.append((
                     gun_adi, d, m, mi,
-                    f"📌 GENEL TEKRAR: {slot_soru} karma soru çöz "
-                    f"({kolaydan_zora_dagilim(slot_soru, 0.5)}) [Tahmini ~{int(slot_soru * 1.5)} dk]",
+                    f"📌 {d} için {slot_soru} karma soru çöz "
+                    f"({kolaydan_zora_dagilim(slot_soru, 0.5)}).",
                     slot_soru, ped, tarih_str,
                 ))
                 continue
@@ -3647,12 +3678,9 @@ def akilli_program_motoru_gorevleri(
             if sec["tur"] == "anlatim":
                 soru = max(1, min(max(10, slot_soru // 2), hedef))
                 video = max(1, int(round(KONU_SURELERI_DK.get(mi, 60) / 30.0)))
-                tahmini = KONU_SURELERI_DK.get(mi, 60) + int(soru * 1.5)
                 tanim = (
-                    f"📌 KONU + SORU: {mi} ➔ {video} ders videosu izle ve kısa özet çıkar, "
-                    f"ardından {soru} soru çöz ({kolaydan_zora_dagilim(soru, 0.0)}). "
-                    f"Bu konunun toplam soru kotası: {hedef} — kota dolmadan sonraki konuya geçilmez. "
-                    f"[Tahmini ~{tahmini} dk]"
+                    f"📌 {mi} ➔ konu anlatımını izle ve kısa özet çıkar, "
+                    f"ardından {soru} soru çöz ({kolaydan_zora_dagilim(soru, 0.0)})."
                 )
                 rows.append((gun_adi, d, m, mi, tanim, soru, ped, tarih_str))
                 sim_bilinen.add(mi)
@@ -3671,10 +3699,8 @@ def akilli_program_motoru_gorevleri(
                 soru = max(1, min(slot_soru, kalan))
                 oran = sec["cozulen"] / float(max(1, hedef))
                 tanim = (
-                    f"🧩 SORU PEKİŞTİRME: {mi} ➔ {soru} soru çöz "
-                    f"({kolaydan_zora_dagilim(soru, oran)}). "
-                    f"Konu kotası: {sec['cozulen'] + soru}/{hedef} soru — kota dolmadan sonraki konuya geçilmez. "
-                    f"[Tahmini ~{int(soru * 1.5)} dk]"
+                    f"🧩 {mi} ➔ {soru} soru çöz "
+                    f"({kolaydan_zora_dagilim(soru, oran)})."
                 )
                 rows.append((gun_adi, d, m, mi, tanim, soru, ped, tarih_str))
                 sim_cozulen[(d, mi)] = sim_cozulen.get((d, mi), 0) + soru
@@ -4231,7 +4257,7 @@ def akilli_program_motoru_v2_gorevleri(
 
         rows.append((
             gun_adi, "TYT Türkçe", "Paragraf", "Günlük Paragraf",
-            f"📖 PARAGRAF: {paragraf_hedef} Paragraf Sorusu Çöz (~30 dk)",
+            f"📖 Günlük paragraf: {paragraf_hedef} soru çöz.",
             paragraf_hedef, "Ezber", tarih_str, "",
         ))
 
@@ -4240,8 +4266,8 @@ def akilli_program_motoru_v2_gorevleri(
             h_soru = min(15, slot_soru)
             rows.append((
                 gun_adi, h["ders"], "Deneme Tekrarı", h["konu"],
-                f"🔁 HATA TEKRARI: {h['konu']} ➔ {h_soru} soru çöz "
-                f"({kolaydan_zora_dagilim(h_soru, 0.0)}). Denemede yanlış yaptığın soru tiplerini öne al.",
+                f"🔁 {h['konu']} ➔ denemede yanlış yaptığın soruları incele ve "
+                f"{h_soru} soru çöz ({kolaydan_zora_dagilim(h_soru, 0.0)}).",
                 h_soru, "Pekiştirme", tarih_str, "",
             ))
 
@@ -4295,11 +4321,11 @@ def akilli_program_motoru_v2_gorevleri(
                     )
                     ogrenme_dk = paket_dk
                     bas = (
-                        f"📌 ALT BAŞLIK + SORU: {mi} ➔ bugünün alt başlıkları: {liste_str}. "
-                        "Her biri için ders videosunu izle ve 3-4 satır not çıkar; "
+                        f"📌 {mi} — bugünün alt başlıkları: {liste_str}. "
+                        "Konu anlatımını izle ve 3-4 satır not çıkar; "
                     )
                     son_not = (
-                        f" ✅ Bu görev bitince '{mi}' tamamlanmış olur, ardından soru kotası devreye girer."
+                        f" ✅ Bu görev bitince '{mi}' tamamlanmış olur."
                         if mikro_bitti else ""
                     )
                 else:
@@ -4307,15 +4333,12 @@ def akilli_program_motoru_v2_gorevleri(
                     video = max(1, int(round(KONU_SURELERI_DK.get(mi, 60) / 30.0)))
                     ogrenme_dk = KONU_SURELERI_DK.get(mi, 60)
                     mikro_bitti = True
-                    bas = f"📌 KONU + SORU: {mi} ➔ {video} ders videosu izle ve kısa özet çıkar, "
+                    bas = f"📌 {mi} ➔ konu anlatımını izle ve kısa özet çıkar, "
                     son_not = ""
-                tahmini = ogrenme_dk + int(soru * 1.5)
                 tanim = (
                     bas
-                    + f"ardından {soru} soru çöz ({kolaydan_zora_dagilim(soru, 0.0)}). "
-                    + f"Bu konunun toplam soru kotası: {hedef}, kota dolmadan sonraki konuya geçilmez."
+                    + f"ardından {soru} soru çöz ({kolaydan_zora_dagilim(soru, 0.0)})."
                     + son_not
-                    + f" [Tahmini ~{tahmini} dk]"
                 )
                 rows.append((gun_adi, d, m, mi, tanim, soru, ped, tarih_str, "||".join(paket)))
                 if mikro_bitti:
@@ -4336,10 +4359,8 @@ def akilli_program_motoru_v2_gorevleri(
                 soru = max(1, min(slot_soru, kalan))
                 oran = sec["cozulen"] / float(max(1, hedef))
                 tanim = (
-                    f"🧩 SORU PEKİŞTİRME: {mi} ➔ {soru} soru çöz "
-                    f"({kolaydan_zora_dagilim(soru, oran)}). "
-                    f"Konu kotası: {sec['cozulen'] + soru}/{hedef} soru, kota dolmadan sonraki konuya geçilmez. "
-                    f"[Tahmini ~{int(soru * 1.5)} dk]"
+                    f"🧩 {mi} ➔ {soru} soru çöz "
+                    f"({kolaydan_zora_dagilim(soru, oran)})."
                 )
                 rows.append((gun_adi, d, m, mi, tanim, soru, ped, tarih_str, ""))
                 sim_cozulen[(d, mi)] = sim_cozulen.get((d, mi), 0) + soru
@@ -4464,6 +4485,25 @@ def eski_program_motoru_gorevleri(
     return gorevler
 
 
+def _gorevleri_zenginlestir(gorevler, ogrenci_id):
+    """FAZ 5B: her göreve alt adımlar (checklist) ve planlanan süre ekler."""
+    sonuc = []
+    for gorev in gorevler or []:
+        alt_sayisi = 1
+        alt = gorev.get("alt_konu")
+        if alt:
+            alt_sayisi = max(1, len([p for p in str(alt).split("||") if p.strip()]))
+        sonuc.append(
+            task_steps.gorev_zenginlestir(
+                gorev,
+                ogrenci_id=ogrenci_id,
+                konu_sureleri=KONU_SURELERI_DK,
+                alt_sayisi=alt_sayisi,
+            )
+        )
+    return sonuc
+
+
 def haftalik_program_gorevleri_uret(
     ogrenci_id,
     aktif_mufredat,
@@ -4492,7 +4532,7 @@ def haftalik_program_gorevleri_uret(
             paragraf_hedef,
         )
         if gorevler:
-            return gorevler, "Alt başlık motoru", uyarilar
+            return _gorevleri_zenginlestir(gorevler, ogrenci_id), "Alt başlık motoru", uyarilar
         uyarilar.append("Alt başlık motoru boş plan üretti.")
     except Exception as hata:  # noqa: BLE001 - motor çökse de program korunur
         uyarilar.append("Alt başlık motoru çalışmadı: %s" % hata)
@@ -4507,7 +4547,11 @@ def haftalik_program_gorevleri_uret(
             paragraf_hedef,
         )
         if gorevler:
-            return gorevler, "Soru kotalı motor", uyarilar
+            return (
+                _gorevleri_zenginlestir(gorevler, ogrenci_id),
+                "Soru kotalı motor",
+                uyarilar,
+            )
         uyarilar.append("Soru kotalı motor boş plan üretti.")
     except Exception as hata:  # noqa: BLE001
         uyarilar.append("Soru kotalı motor çalışmadı: %s" % hata)
@@ -4521,7 +4565,7 @@ def haftalik_program_gorevleri_uret(
         filtered_ezber,
     )
     uyarilar.append("Temel program motoru kullanıldı.")
-    return gorevler, "Temel motor", uyarilar
+    return _gorevleri_zenginlestir(gorevler, ogrenci_id), "Temel motor", uyarilar
 
 
 if "active_user" not in st.session_state:
@@ -5727,7 +5771,7 @@ def _oturum_bitirme_formu(oturum, planlanan_soru=0):
         st.rerun()
     if kaydet:
         try:
-            study_sessions.oturum_tamamla(
+            kaydedilen = study_sessions.oturum_tamamla(
                 oid,
                 cozulen_soru=cozulen,
                 gercek_sure_dk=gercek_dk,
@@ -5739,6 +5783,13 @@ def _oturum_bitirme_formu(oturum, planlanan_soru=0):
         except study_sessions.CalismaOturumHatasi as hata:
             _calisma_hata_goster(hata)
         else:
+            # FAZ 5B: gerçek çalışma kaydı görevin alt adımlarını ilerletir;
+            # tüm adımlar bittiyse görev otomatik tamamlanır.
+            try:
+                if kaydedilen and kaydedilen.get("gorev_id"):
+                    task_steps.gorev_durum_guncelle(kaydedilen["gorev_id"])
+            except Exception:
+                pass
             st.session_state.pop(CALISMA_BITIR_ANAHTARI, None)
             set_flash_message("success", "✅ Çalışma kaydedildi.")
             st.rerun()
@@ -5818,6 +5869,58 @@ def _gorev_gercek_soru_ozeti(gorev, ogrenci_id):
     if gercek["sure_dk"]:
         parcalar.append(f"{dakika_bicimle(gercek['sure_dk'])} çalışma")
     st.caption("📊 " + " • ".join(parcalar))
+
+
+def _gorev_adimlari_senkron(gorev_id, kayitli_durum):
+    """Adımları okur; türetilen tamamlanma kayıtlı durumdan farklıysa eşitler.
+
+    Görev tamamlanması alt adımlara bağlıdır: soru blokları gerçek çalışma
+    oturumlarından dolduğunda görev kendiliğinden tamamlanır.
+    """
+    adimlar = task_steps.gorev_adimlari(gorev_id)
+    if not adimlar:
+        return []
+    tamam = all(a["tamam"] for a in adimlar)
+    if bool(kayitli_durum) != tamam:
+        try:
+            task_steps.gorev_durum_guncelle(gorev_id)
+        except Exception:
+            pass
+    return adimlar
+
+
+def _gorev_adim_listesi(adimlar):
+    """FAZ 5B: mikro görev checklist'i.
+
+    - Elle yapılan adımlar (video izle, not çıkar) checkbox olarak tutulur ve
+      durumları veritabanına yazılır; sayfa yenilenince korunur.
+    - Soru blokları salt okunurdur: tamamlanma durumları yalnızca GERÇEK
+      çalışma oturumlarından türetilir. Kutuya tıklamak soru ilerlemesi
+      üretmez (tek gerçek kaynak FAZ 4 oturumlarıdır).
+    """
+    if not adimlar:
+        return
+    st.markdown("**Yapılacaklar**")
+    for adim in adimlar:
+        if adim.get("adim_turu") == task_steps.ADIM_SORU:
+            gercek = int(adim.get("gercek_soru") or 0)
+            hedef = int(adim.get("hedef_soru") or 0)
+            ikon = "✅" if adim.get("tamam") else "🔢"
+            st.markdown(
+                f"{ikon} **{adim['baslik']}** · gerçekleşen **{gercek}/{hedef}**"
+            )
+            if hedef > 0:
+                st.progress(min(1.0, gercek / float(hedef)))
+            continue
+        anahtar = "adim_chk_%s" % adim["id"]
+        gorev_chk_durum_senkron(anahtar, bool(adim.get("tamam")))
+        secili = st.checkbox(adim["baslik"], key=anahtar)
+        if secili != bool(adim.get("tamam")):
+            try:
+                task_steps.adim_durum_degistir(adim["id"], secili)
+            except task_steps.AdimHatasi as hata:
+                _calisma_hata_goster(hata)
+            st.rerun()
 
 
 def _calisma_basla_butonu(gorev, ogrenci_id):
@@ -5941,8 +6044,18 @@ with tab1:
     _gercek_calisma_ozeti(ogrenci_id, aktif_oturum)
     st.markdown("---")
 
+    # FAZ 5B: adımlar bir kez okunur; görev tamamlanması adımlardan türetilir.
+    adim_onbellek = {
+        int(satir["id"]): _gorev_adimlari_senkron(int(satir["id"]), satir["durum"])
+        for _, satir in df_bugun.iterrows()
+    }
+
     if not df_bugun.empty:
-        biten_cnt = len(df_bugun[df_bugun["durum"] == 1])
+        biten_cnt = 0
+        for _, satir in df_bugun.iterrows():
+            adimlar = adim_onbellek.get(int(satir["id"])) or []
+            bitti = all(a["tamam"] for a in adimlar) if adimlar else bool(satir["durum"])
+            biten_cnt += 1 if bitti else 0
         toplam_cnt = len(df_bugun)
         yuzde_bugun = int((biten_cnt / toplam_cnt) * 100) if toplam_cnt > 0 else 0
 
@@ -5956,47 +6069,77 @@ with tab1:
         st.markdown("---")
 
         for _, g_row in df_bugun.iterrows():
-            g_id = g_row["id"]
-            is_done = bool(g_row["durum"])
+            g_id = int(g_row["id"])
             ped = g_row["pedagoji_turu"]
+            # FAZ 5B: alt adımları olan görevlerde tamamlanma adımlardan türetilir.
+            adimlar = adim_onbellek.get(g_id) or []
+            is_done = (
+                all(a["tamam"] for a in adimlar) if adimlar else bool(g_row["durum"])
+            )
+            sure_dk = g_row.get("tahmini_sure_dk")
+            try:
+                sure_dk = int(sure_dk) if sure_dk == sure_dk else 0
+            except (TypeError, ValueError):
+                sure_dk = 0
+            alt_konu = g_row.get("alt_konu")
+            mikro_satiri = (
+                f'<p style="margin:2px 0 6px 0; color:#475569;">'
+                f"<b>Mikro konu:</b> {alt_konu}</p>"
+                if isinstance(alt_konu, str) and alt_konu.strip()
+                else ""
+            )
+            sure_etiketi = (
+                f'<span style="background-color:#dcfce7; color:#166534;'
+                f" padding:2px 8px; border-radius:6px; font-size:0.85rem;"
+                f' font-weight:600;">⏱️ {task_steps.sure_metni(sure_dk)}</span> '
+                if sure_dk > 0
+                else ""
+            )
 
             st.markdown(
                 f'<div class="focus-task-card">'
-                f'<h4>{"✅" if is_done else "📌"} {g_row["ders"]} - {g_row["mikro_konu"]}</h4>'
+                f'<h4>{"✅" if is_done else "📌"} {g_row["ders"]} — {g_row["mikro_konu"]}</h4>'
+                f"{mikro_satiri}"
                 f'<p style="font-size: 1.05rem; margin-bottom: 8px;">{g_row["gorev_tanimi"]}</p>'
+                f"{sure_etiketi}"
                 f'<span style="background-color:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:6px; font-size:0.85rem; font-weight:600;">{ped}</span>'
-                f'</div>',
+                f"</div>",
                 unsafe_allow_html=True,
             )
 
-            col_chk1, col_chk2 = st.columns([4, 1])
-            with col_chk2:
-                chk_anahtar = f"focus_chk_{g_id}"
-                # FAZ 4: aynı görev haftalık program sekmesinde de
-                # işaretlenebildiği için oturum değeri veritabanıyla eşitlenir.
-                gorev_chk_durum_senkron(chk_anahtar, is_done)
-                chk_val = st.checkbox(
-                    "Tamamladım",
-                    key=chk_anahtar,
-                )
-                if chk_val != is_done:
-                    with get_connection() as conn:
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "UPDATE calisma_programi_gorevler SET durum = ? WHERE id = ?",
-                            (1 if chk_val else 0, g_id),
-                        )
-                        conn.commit()
-                    log_islem(
-                        current_user["id"],
-                        "TASK_TOGGLE_FOCUS",
-                        f"Gorev ID {g_id} -> {chk_val}",
+            if adimlar:
+                # FAZ 5B: mikro görev checklist'i (soru blokları salt okunur)
+                _gorev_adim_listesi(adimlar)
+            else:
+                col_chk1, col_chk2 = st.columns([4, 1])
+                with col_chk2:
+                    chk_anahtar = f"focus_chk_{g_id}"
+                    # FAZ 4: aynı görev haftalık program sekmesinde de
+                    # işaretlenebildiği için oturum değeri veritabanıyla eşitlenir.
+                    gorev_chk_durum_senkron(chk_anahtar, is_done)
+                    chk_val = st.checkbox(
+                        "Tamamladım",
+                        key=chk_anahtar,
                     )
-                    # FAZ 4: checkbox yalnızca görev durumunu değiştirir.
-                    # Soru ilerlemesi planlanan sorudan DEĞİL, gerçek çalışma
-                    # oturumlarından hesaplanır (soru_ilerleme_isle kaldırıldı).
-                    gorev_alt_konu_isle(g_id, chk_val)
-                    st.rerun()
+                    if chk_val != is_done:
+                        with get_connection() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                "UPDATE calisma_programi_gorevler SET durum = ?"
+                                " WHERE id = ?",
+                                (1 if chk_val else 0, g_id),
+                            )
+                            conn.commit()
+                        log_islem(
+                            current_user["id"],
+                            "TASK_TOGGLE_FOCUS",
+                            f"Gorev ID {g_id} -> {chk_val}",
+                        )
+                        # FAZ 4: checkbox yalnızca görev durumunu değiştirir.
+                        # Soru ilerlemesi planlanan sorudan DEĞİL, gerçek çalışma
+                        # oturumlarından hesaplanır (soru_ilerleme_isle kaldırıldı).
+                        gorev_alt_konu_isle(g_id, chk_val)
+                        st.rerun()
 
             # FAZ 4: görev kartının altında çalışma zamanlayıcısı
             gosterilen_gorevler.add(int(g_id))
@@ -7419,7 +7562,17 @@ with tab5:
     )
 
     if not df_program_full.empty:
-        biten_gorev = len(df_program_full[df_program_full["durum"] == 1])
+        # FAZ 5B: tamamlanma alt adımlardan türetilir (soru adımları gerçek
+        # çalışma kayıtlarından gelir).
+        hafta_adimlari = {
+            int(satir["id"]): _gorev_adimlari_senkron(int(satir["id"]), satir["durum"])
+            for _, satir in df_program_full.iterrows()
+        }
+        biten_gorev = 0
+        for _, satir in df_program_full.iterrows():
+            adimlar = hafta_adimlari.get(int(satir["id"])) or []
+            bitti = all(a["tamam"] for a in adimlar) if adimlar else bool(satir["durum"])
+            biten_gorev += 1 if bitti else 0
         toplam_gorev = len(df_program_full)
         p_yuzde = (
             int((biten_gorev / toplam_gorev) * 100) if toplam_gorev > 0 else 0
@@ -7475,28 +7628,52 @@ with tab5:
                                 f"📌 **{row['makro_konu']}** ➔"
                                 f" *{row['mikro_konu']}*"
                             )
+                            sure_dk = row.get("tahmini_sure_dk")
+                            if pd.notna(sure_dk) and int(sure_dk or 0) > 0:
+                                st.caption(
+                                    "⏱️ " + task_steps.sure_metni(int(sure_dk))
+                                )
                         with col_g2:
-                            is_t = bool(row["durum"])
-                            prog_anahtar = f"prog_chk_{row['id']}"
-                            # FAZ 4: iki sekme arasındaki checkbox değeri
-                            # çakışmasını (sonsuz rerun) önler.
-                            gorev_chk_durum_senkron(prog_anahtar, is_t)
-                            chk_g = st.checkbox(
-                                "Tamamlandı",
-                                key=prog_anahtar,
+                            prog_adimlar = hafta_adimlari.get(int(row["id"])) or []
+                            is_t = (
+                                all(a["tamam"] for a in prog_adimlar)
+                                if prog_adimlar
+                                else bool(row["durum"])
                             )
-                            if chk_g != is_t:
-                                with get_connection() as conn:
-                                    # FAZ 4: planlanan soru ilerlemeye eklenmez.
-                                    gorev_alt_konu_isle(row["id"], chk_g)
-                                    cursor = conn.cursor()
-                                    cursor.execute(
-                                        "UPDATE calisma_programi_gorevler SET"
-                                        " durum = ? WHERE id = ?",
-                                        (1 if chk_g else 0, row["id"]),
+                            if prog_adimlar:
+                                # Soru adımları gerçek oturumlardan geldiği için
+                                # bu görevler elle işaretlenmez.
+                                ilerleme = task_steps.gorev_ilerleme(int(row["id"]))
+                                st.caption(
+                                    "✅ Tamamlandı"
+                                    if is_t
+                                    else "⏳ %d/%d adım"
+                                    % (
+                                        ilerleme["tamamlanan_adim"],
+                                        ilerleme["adim_sayisi"],
                                     )
-                                    conn.commit()
-                                st.rerun()
+                                )
+                            else:
+                                prog_anahtar = f"prog_chk_{row['id']}"
+                                # FAZ 4: iki sekme arasındaki checkbox değeri
+                                # çakışmasını (sonsuz rerun) önler.
+                                gorev_chk_durum_senkron(prog_anahtar, is_t)
+                                chk_g = st.checkbox(
+                                    "Tamamlandı",
+                                    key=prog_anahtar,
+                                )
+                                if chk_g != is_t:
+                                    with get_connection() as conn:
+                                        # FAZ 4: planlanan soru ilerlemeye eklenmez.
+                                        gorev_alt_konu_isle(row["id"], chk_g)
+                                        cursor = conn.cursor()
+                                        cursor.execute(
+                                            "UPDATE calisma_programi_gorevler SET"
+                                            " durum = ? WHERE id = ?",
+                                            (1 if chk_g else 0, row["id"]),
+                                        )
+                                        conn.commit()
+                                    st.rerun()
                         st.markdown("---")
                 else:
                     st.info("Bu gün için planlanmış bir çalışma görevi bulunmuyor.")
