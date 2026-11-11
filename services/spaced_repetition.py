@@ -222,6 +222,7 @@ CREATE TABLE IF NOT EXISTS tekrar_kayitlari (
     ders TEXT NOT NULL,
     makro_konu TEXT,
     mikro_konu TEXT NOT NULL,
+    alt_konu TEXT,
     tekrar_turu TEXT NOT NULL,
     kaynak_gorev_id INTEGER,
     kaynak_adim_id INTEGER,
@@ -248,6 +249,9 @@ _EK_KOLONLAR = (
     ("hedef_soru", "INTEGER NOT NULL DEFAULT 0"),
     ("aciklama", "TEXT"),
     ("guncelleme_zamani", "TEXT"),
+    # FAZ 6A: tekrar kaydı gerçek MİKRO KONUYA (alt_konu) bağlanır. Eski
+    # kayıtlarda bu alan NULL kalır (geriye dönük veri uydurulmaz).
+    ("alt_konu", "TEXT"),
 )
 
 _INDEKSLER = (
@@ -261,10 +265,13 @@ _INDEKSLER = (
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_tekrar_ogrenme_olayi"
     " ON tekrar_kayitlari(ogrenci_id, kaynak_gorev_id, tekrar_turu)"
     " WHERE kaynak_gorev_id IS NOT NULL",
-    # Aynı konu + tür için aynı anda yalnızca BİR bekleyen tekrar.
+    # FAZ 6A: aynı konu + MİKRO KONU (alt_konu) + tür için aynı anda yalnızca
+    # BİR bekleyen tekrar. Eski indeks alt_konu içermediği için önce düşürülür;
+    # yeni indeks eskisinden DAHA GÜÇLÜ olduğundan mevcut veri ihlal etmez.
+    "DROP INDEX IF EXISTS idx_tekrar_tek_bekleyen",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_tekrar_tek_bekleyen"
     " ON tekrar_kayitlari(ogrenci_id, ders, COALESCE(makro_konu, ''),"
-    " mikro_konu, tekrar_turu) WHERE durum = 'Bekliyor'",
+    " mikro_konu, COALESCE(alt_konu, ''), tekrar_turu) WHERE durum = 'Bekliyor'",
 )
 
 
@@ -503,12 +510,30 @@ def _ilk_adim(adimlar, tur):
     return None
 
 
+def _tek_mikro(deger):
+    """Tek mikro konu adı döner; boş veya paketlenmiş ("||") değerde None."""
+    metin = _metin(deger)
+    if not metin or "||" in metin:
+        return None
+    return metin
+
+
+def _konu_etiketi(gorev):
+    """Tekrar açıklamasında kullanılan 'ana ➔ mikro' etiketi."""
+    mikro = _metin(gorev.get("mikro_konu"))
+    alt = _tek_mikro(gorev.get("alt_konu"))
+    return "%s ➔ %s" % (mikro, alt) if alt else mikro
+
+
 def _tekrar_verisi(gorev, tur, adim_id, gun_sayisi, ogrenme, pedagoji, aciklama):
     return {
         "ogrenci_id": int(gorev["ogrenci_id"]),
         "ders": _metin(gorev.get("ders")),
         "makro_konu": _metin(gorev.get("makro_konu")),
         "mikro_konu": _metin(gorev.get("mikro_konu")),
+        # FAZ 6A: tekrar gerçek mikro konuya bağlanır; paketlenmiş ("||") veya
+        # boş alt başlık ana konu düzeyinde kalır.
+        "alt_konu": _tek_mikro(gorev.get("alt_konu")),
         "tekrar_turu": tur,
         "kaynak_gorev_id": int(gorev["id"]),
         "kaynak_adim_id": int(adim_id) if adim_id not in (None, "", 0) else None,
@@ -521,12 +546,12 @@ def _tekrar_verisi(gorev, tur, adim_id, gun_sayisi, ogrenme, pedagoji, aciklama)
 
 
 def _bekleyen_var_mi(conn, veri):
-    """Aynı öğrenme olayı veya aynı konu + tür için bekleyen kayıt var mı?"""
+    """Aynı öğrenme olayı veya aynı konu + mikro konu + tür için bekleyen var mı?"""
     satir = conn.execute(
         "SELECT id FROM tekrar_kayitlari WHERE ogrenci_id = ? AND tekrar_turu = ?"
         " AND ((kaynak_gorev_id IS NOT NULL AND kaynak_gorev_id = ?)"
         "      OR (durum = ? AND ders = ? AND COALESCE(makro_konu, '') = ?"
-        "          AND mikro_konu = ?))"
+        "          AND mikro_konu = ? AND COALESCE(alt_konu, '') = ?))"
         " LIMIT 1",
         (
             veri["ogrenci_id"],
@@ -536,6 +561,7 @@ def _bekleyen_var_mi(conn, veri):
             veri["ders"],
             veri["makro_konu"] or "",
             veri["mikro_konu"],
+            veri.get("alt_konu") or "",
         ),
     ).fetchone()
     return satir is not None
@@ -548,16 +574,17 @@ def _tekrar_ekle(conn, veri, zaman):
     try:
         imlec = conn.execute(
             "INSERT INTO tekrar_kayitlari"
-            " (ogrenci_id, ders, makro_konu, mikro_konu, tekrar_turu,"
+            " (ogrenci_id, ders, makro_konu, mikro_konu, alt_konu, tekrar_turu,"
             "  kaynak_gorev_id, kaynak_adim_id, planlanan_tarih, durum,"
             "  ogrenme_tarihi, pedagoji_turu, hedef_soru, aciklama,"
             "  olusturma_zamani)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 veri["ogrenci_id"],
                 veri["ders"],
                 veri["makro_konu"],
                 veri["mikro_konu"],
+                veri.get("alt_konu"),
                 veri["tekrar_turu"],
                 veri["kaynak_gorev_id"],
                 veri["kaynak_adim_id"],
@@ -590,6 +617,8 @@ def tekrar_planla(gorev_id, an=None):
       - Her öğrenme olayı için öğrenme günü + 3 gün: 3 Günlük Tekrar.
       - `pedagoji_turu == 'Ezber'` ve kısa not adımı varsa öğrenme günü
         + 5 gün: 5 Günlük Özet Notu (ek soru zorunluluğu yok).
+      - Kayıt gerçek MİKRO KONUYA (`alt_konu`) bağlanır: aynı ana konunun
+        farklı mikro konuları ayrı tekrarlar üretir (FAZ 5D uyumu).
 
     Idempotenttir: aynı görev için ikinci kez yeni kayıt üretmez; yalnızca bu
     çağrıda oluşturulan kayıtları döndürür.
@@ -613,7 +642,7 @@ def tekrar_planla(gorev_id, an=None):
     ogrenme = _an_tarihi(an)
     zaman = _zaman_yaz(_an_zamani(an))
     pedagoji = _metin(gorev.get("pedagoji_turu")) or "Pekiştirme"
-    mikro = _metin(gorev.get("mikro_konu"))
+    mikro = _konu_etiketi(gorev)
 
     planlar = [
         _tekrar_verisi(
