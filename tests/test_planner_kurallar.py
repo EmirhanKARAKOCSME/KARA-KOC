@@ -117,6 +117,8 @@ class PlannerKurallarTestleri(unittest.TestCase):
             "tamamlanan_altlar": set(),
             "alarm_konular": [],
             "tekrar_entegrasyonu": False,
+            # v2.3: özgün (legacy) planlama davranışını doğrular.
+            "legacy_mod": True,
         }
         baglam.update(ek)
         return baglam

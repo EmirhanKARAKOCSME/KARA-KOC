@@ -90,6 +90,8 @@ class PlannerTekrarTestleri(unittest.TestCase):
             "pedagoji": {},
             "tamamlanan_altlar": set(),
             "alarm_konular": [],
+            # v2.3: özgün (legacy) planlama davranışını doğrular.
+            "legacy_mod": True,
         }
         baglam.update(ek)
         return baglam

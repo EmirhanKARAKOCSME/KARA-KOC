@@ -928,18 +928,29 @@ def _pekistirme_bekleyen(ogrenci_id):
 
 
 def _ogrenci_sinif_alan(ogrenci_id):
-    """Öğrencinin (sinif_seviyesi, hedef_alan) bilgisini okur (yoksa None)."""
+    """Öğrencinin (sinif_seviyesi, hedef_alan) bilgisini okur.
+
+    v2.3 (FAZ 1.1): DB'de sınıf/alan boşsa **"Mezun" / "SAY"** varsayılanı döner;
+    böylece üretim çağrılarında TYT➔AYT çekirdek kilidi ve müfredat sırası asla
+    devre dışı kalmaz. Tablo yoksa da güvenli varsayılan döner.
+    """
+    sinif, hedef_alan = None, None
     try:
         with get_connection(db_path) as conn:
             satir = conn.execute(
                 "SELECT sinif_seviyesi, hedef_alan FROM ogrenciler WHERE id = ?",
                 (ogrenci_id,),
             ).fetchone()
-    except Exception:  # noqa: BLE001 - tablo yoksa kısıtlama uygulanmaz
-        return None, None
-    if not satir:
-        return None, None
-    return satir[0], satir[1]
+    except Exception:  # noqa: BLE001 - tablo yoksa güvenli varsayılan
+        return "Mezun", "SAY"
+    if satir:
+        sinif = satir[0]
+        hedef_alan = satir[1]
+    if isinstance(sinif, str):
+        sinif = sinif.strip()
+    if isinstance(hedef_alan, str):
+        hedef_alan = hedef_alan.strip()
+    return (sinif or "Mezun"), (hedef_alan or "SAY")
 
 
 def planlama_baglami_olustur(ogrenci_id, aktif_mufredat, alarmlar_db,

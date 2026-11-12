@@ -1450,9 +1450,12 @@ def sure_plani(
     # v2.2 (FAZ 3): %0 konu anlatımı — anlatım süresi 1.45x uzatılır ve blok
     # EN AZ %50 anlatım olacak şekilde dengelenir (anlatım >= soru çözümü).
     if konu_anlatimi:
-        ogrenme = max(MIN_KONU_ANLATIM_DK, _yuvarla5(float(ogrenme or 0) * 1.45))
-        if (ogrenme + not_dk) < soru_dk:
-            ogrenme += (soru_dk - (ogrenme + not_dk))
+        # v2.3 (FAZ 1.3): anlatım bloğu 1.5x uzatılır ve toplam sürenin EN AZ
+        # %55'i anlatım olacak şekilde dengelenir (okuma >= 1.2222 * pratik).
+        ogrenme = max(MIN_KONU_ANLATIM_DK, _yuvarla5(float(ogrenme or 0) * 1.5))
+        _hedef_okuma = (0.55 / 0.45) * soru_dk
+        if (ogrenme + not_dk) < _hedef_okuma:
+            ogrenme += (_hedef_okuma - (ogrenme + not_dk))
 
     toplam = max(5, ogrenme + not_dk + soru_dk)
     # KURAL 2 (v2.1): okuma/pratik süre payları ve ders kategorisi. Değerler

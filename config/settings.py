@@ -19,7 +19,7 @@ ORTAM_DB_DEGISKENI = "KARAKOC_DB_PATH"
 
 # Şema/migration kodu değiştiğinde bu sürüm artırılır; bootstrap cache anahtarı
 # bu değeri içerir (bkz. config/database.py).
-DB_BOOTSTRAP_SURUMU = "3"
+DB_BOOTSTRAP_SURUMU = "4"
 
 
 def varsayilan_db_yolu() -> str:

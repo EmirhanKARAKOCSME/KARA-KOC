@@ -492,6 +492,28 @@ def gorev_chk_durum_senkron(anahtar, veritaban_degeri):
         st.session_state[isaret] = yeni
 
 
+def makro_unite_ilerleme_durumu(ogrenci_id, ders, makro_unite, mufredat):
+    """Bir makro ünitenin tamamlanma yüzdesi (0-100, tam sayı).
+
+    v2.3 (FAZ 1.4): görev tamamlanınca bildirimde "Ünite İlerlemesi:
+    %33 ➔ %67" göstermek için kullanılır. Ünitedeki mikro konuların %100
+    biten oranına dayanır; tablo yoksa 0 döner (planlama/arayüz bozulmaz).
+    """
+    try:
+        mikrolar = ((mufredat or {}).get(ders) or {}).get(makro_unite) or []
+    except Exception:  # noqa: BLE001
+        mikrolar = []
+    if not mikrolar:
+        return 0
+    try:
+        biten = biten_konulari_yukle(ogrenci_id, mufredat)
+    except Exception:  # noqa: BLE001
+        biten = set()
+    tamam = sum(1 for m in mikrolar if (ders, m) in biten)
+    return int(round(tamam / float(len(mikrolar)) * 100))
+
+
+
 def build_student_curriculum(sinif, alan):
     if sinif == "9. Sınıf":
         return mufredat_maarif_9

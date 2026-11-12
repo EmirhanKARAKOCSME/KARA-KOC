@@ -58,6 +58,11 @@ GUN_SAYISI = 7
 VARSAYILAN_GUNLUK_DAKIKA = 360
 MAKS_GUNLUK_DAKIKA = 1440
 MIN_ANLAMLI_BLOK = 5
+# v2.3 (FAZ 1.3): yeni/devam eden ANA KONU görevleri için minimum anlamlı
+# blok. Daha küçük "5 soru ~11 dk" kırıntıları üretilmez; süre yetmezse
+# görev ertesi güne bırakılır.
+MIN_KONU_BLOK_DK = 25
+MIN_KONU_BLOK_SORU = 15
 MAKS_YENI_MIKRO_GUN = 2
 # Bir dersten bir güne düşebilecek en fazla görev sayısı (ders dengesi).
 MAKS_DERS_GOREV_GUN = 3
@@ -1632,10 +1637,21 @@ def plan_uret(baglam, referans_tarihi=None):
     # ------------------------------------------------------------------
     # v2.2 (FAZ 1-4): havuz kilidi, mutlak sıra, referans tarihi.
     # ------------------------------------------------------------------
-    sinif_seviyesi = baglam.get("sinif_seviyesi")
-    alan = baglam.get("alan") or baglam.get("hedef_alan")
-    # Sınıf seviyesi + alan havuzunu sert biçimde süz (AYT/alan izolasyonu).
-    mufredat = curriculum_meta.havuz_suz(mufredat, sinif_seviyesi, alan)
+    # v2.3 (FAZ 1.1): sınıf/alan boş gelse bile varsayılan atanır; böylece
+    # TYT➔AYT çekirdek kilidi ve müfredat sırası asla devre dışı kalmaz.
+    sinif_seviyesi = (
+        baglam.get("sinif_seviyesi") or baglam.get("sinif") or "Mezun"
+    )
+    alan = baglam.get("alan") or baglam.get("hedef_alan") or "SAY"
+    # v2.3 (FAZ 1.1): tek branş / çekirdek kilit / müfredat sırası VARSAYILAN
+    # OLARAK HER ZAMAN aktiftir. Yalnızca eski planlar `legacy_mod=True` ile
+    # açıkça kapatabilir.
+    _legacy_mod = bool(baglam.get("legacy_mod", False))
+    tek_brans_aktif = not _legacy_mod
+    # Sınıf seviyesi + alan havuzunu süz (AYT/alan izolasyonu). Legacy planlarda
+    # bu filtre uygulanmaz (özgün davranış korunur).
+    if not _legacy_mod:
+        mufredat = curriculum_meta.havuz_suz(mufredat, sinif_seviyesi, alan)
     # Mutlak müfredat sırası (1'den başlayan) ve makro ünite haritası.
     sira_map = baglam.get("sira_no_map") or curriculum_meta.sira_no_haritasi(mufredat)
     makro_map = baglam.get("makro_unite_map") or curriculum_meta.makro_haritasi(mufredat)
@@ -1661,11 +1677,7 @@ def plan_uret(baglam, referans_tarihi=None):
     _sinif_sayi = curriculum_meta.sinif_seviyesi_sayisi(sinif_seviyesi)
     _biten_kumesi = {curriculum_meta.normalize_konu_adi(b) for b in biten_mikro_adlari}
     _bilinen_hepsi = bilinen_norm | _biten_kumesi
-    # v2.2: tek branş / çekirdek kilit yalnızca sınıf-alan bilgisi verilen
-    # planlarda devreye girer (eski sınıf-bilgisiz planlar bozulmaz).
-    tek_brans_aktif = (
-        sinif_seviyesi is not None or bool(baglam.get("tek_brans_gun"))
-    )
+    # (_legacy_mod / tek_brans_aktif yukarıda FAZ 1.1 bölümünde tanımlandı.)
 
     def _cekirdek_acik(ders):
         if not tek_brans_aktif:
@@ -1742,12 +1754,8 @@ def plan_uret(baglam, referans_tarihi=None):
     planlanan = set()
     kuyruk = {}
 
-    # v2.2 (FAZ 2): aynı gün aynı ana branştan en fazla 1 ana konu görevi.
-    # Bu kural yalnızca sınıf/alan bilgisi verilen (üretim + yeni test) planlarda
-    # devreye girer; eski planlama davranışı bozulmaz.
-    tek_brans_aktif = (
-        sinif_seviyesi is not None or bool(baglam.get("tek_brans_gun"))
-    )
+    # v2.3 (FAZ 2): aynı gün aynı ana branştan en fazla 1 ana konu görevi.
+    # `tek_brans_aktif` FAZ 1.1 bölümünde bir kez tanımlandı.
     gun_brans_ana = {gun: set() for gun in gunler}
     # Rotasyon: yan derslerin ardışık günlerde sürekli tekrarını cezalandır.
     SIDE_BRANSLAR = {
@@ -2010,8 +2018,137 @@ def plan_uret(baglam, referans_tarihi=None):
                 "mikro_hedef": mikro_hedef,
             })
 
+    # v2.3 (FAZ 1.2): dinamik kuyruk besleyicileri (yalnızca yeni modda).
+    # Her ders için sıradaki TEK ana konunun ilk mikro altı kuyruğa girer; o
+    # birim kalan<=0 ile düşünce aynı dersin bir sonraki alt/konusu beslenir.
+    ders_birimler = {}
+    ders_devam = {}
+    ders_kuyrukta = {}
+
+    def _birim_olustur(ders, makro, ana):
+        """Ana konunun kalan işini sıralı mikro birimlere çevirir."""
+        ilk_kez = not (
+            int(gercek.get((ders, ana), 0) or 0)
+            or any(
+                int(deger or 0)
+                for anahtar, deger in mikro_cozulen.items()
+                if anahtar[0] == ders and anahtar[1] == ana
+            )
+            or (ders, ana) in ogrenilmis
+        )
+        _tur_ana = "pes" if (ders, ana) in ogrenilmis else "anlatim"
+        _sira = sira_map.get((ders, ana), 10 ** 6)
+        mkredi = curriculum_meta.makro_kredi_puani(makro)
+        dilimler = [
+            (alt, int(pay or 0), sure, mikro_hedef)
+            for alt, pay, sure, mikro_hedef in _mikro_dilimi(ders, makro, ana)
+            if (ders, ana, alt) not in planlanan
+        ]
+        if not dilimler:
+            return []
+
+        def _birlestir(grup):
+            return {
+                "ders": ders, "makro": makro, "ana": ana,
+                "alt": grup[0][0],
+                "kalan": sum(d[1] for d in grup),
+                "pay_dk": grup[0][2],
+                "mikro_hedef": sum(int(d[3] or 0) for d in grup),
+                "ilk_kez": ilk_kez, "tur": _tur_ana,
+                "sira_no": _sira, "makro_kredi": mkredi,
+            }
+
+        # v2.3 (FAZ 1.3): küçük mikro dilimleri >= MIN_KONU_BLOK_SORU olacak
+        # biçimde birleştir ("5 soru ~11 dk" kırıntısı üretilmez).
+        birimler = []
+        grup = []
+        grup_soru = 0
+        for d in dilimler:
+            grup.append(d)
+            grup_soru += d[1]
+            if grup_soru >= MIN_KONU_BLOK_SORU:
+                birimler.append(_birlestir(grup))
+                grup, grup_soru = [], 0
+        if grup:
+            if birimler:
+                son = birimler[-1]
+                son["kalan"] += grup_soru
+                son["mikro_hedef"] += sum(int(d[3] or 0) for d in grup)
+            else:
+                birimler.append(_birlestir(grup))
+        return birimler
+
+    def _ders_birimleri_kur(ders, makro_dict):
+        """Dersin konularını sira_no ASC (Motor 2'de kredi) ile sıralar."""
+        adaylar = []
+        for makro, mikrolar in makro_dict.items():
+            if not isinstance(mikrolar, list):
+                continue
+            for ana in mikrolar:
+                if ana in bilinen or (str(ders), str(ana)) in biten:
+                    continue
+                if not _on_kosul_hazir(ana, bilinen, kurallar):
+                    continue
+                adaylar.append((makro, ana))
+        motor2_ders = motor2_aktif and not curriculum_meta.motor1_mi(ders)
+        if motor2_ders and adaylar:
+            # (makro_unite_max_kredi DESC, sira_no ASC)
+            adaylar.sort(
+                key=lambda c: (
+                    -curriculum_meta.makro_kredi_puani(c[0]),
+                    sira_map.get((ders, c[1]), 10 ** 6),
+                )
+            )
+            hedef_makro = adaylar[0][0]
+            adaylar = [c for c in adaylar if c[0] == hedef_makro]
+        else:
+            adaylar.sort(key=lambda c: sira_map.get((ders, c[1]), 10 ** 6))
+        birimler = []
+        for makro, ana in adaylar:
+            birimler.extend(_birim_olustur(ders, makro, ana))
+        return birimler
+
+    def _ders_besle(ders):
+        """Dersin sıradaki birimini kuyruğa ekler (aktif birim varsa bekle)."""
+        if ders_kuyrukta.get(ders):
+            return
+        birimler = ders_birimler.get(ders) or []
+        idx = ders_devam.get(ders, 0)
+        while idx < len(birimler) and (
+            (ders, birimler[idx]["ana"], birimler[idx]["alt"]) in planlanan
+        ):
+            idx += 1
+        if idx >= len(birimler):
+            ders_devam[ders] = idx
+            return
+        b = birimler[idx]
+        _kuyruga_ekle({
+            "oncelik": 4, "tur": b["tur"], "ders": ders,
+            "makro": b["makro"], "ana": b["ana"], "mikro": b["alt"],
+            "kalan": b["kalan"], "kaynak": None, "pay_dk": b["pay_dk"],
+            "mikro_hedef": b["mikro_hedef"], "ilk_kez": b["ilk_kez"],
+            "sira_no": b["sira_no"], "makro_kredi": b["makro_kredi"],
+        })
+        ders_devam[ders] = idx + 1
+        ders_kuyrukta[ders] = True
+
+    if tek_brans_aktif:
+        # Yalnızca her dersin sıradaki tek ana konusunun ilk mikro altı.
+        for _ders, _makro_dict in (mufredat or {}).items():
+            if not isinstance(_makro_dict, dict):
+                continue
+            if not _cekirdek_acik(_ders):
+                continue
+            ders_birimler[_ders] = _ders_birimleri_kur(_ders, _makro_dict)
+            ders_devam[_ders] = 0
+            ders_kuyrukta[_ders] = False
+            _ders_besle(_ders)
+
+
     # 4) Yeni mikro konular (MUTLAK müfredat sırası / Motor 2 kredi)
     for ders, makro_dict in (mufredat or {}).items():
+        if tek_brans_aktif:
+            break  # yeni modda kuyruk yukarıda DİNAMİK beslenir
         if not isinstance(makro_dict, dict):
             continue
         # FAZ 1.3: çekirdek TYT→AYT kilidi (11. sınıf istisnası hariç).
@@ -2211,7 +2348,9 @@ def plan_uret(baglam, referans_tarihi=None):
 
         for _ in range(60):  # gün içi yerleştirme turu
             kalan_dk = kap - gun_dk[tarih]
-            if kalan_dk < MIN_ANLAMLI_BLOK:
+            # v2.3 (FAZ 1.3): yeni modda gün içi kırıntı bloğu yok (min 25 dk).
+            _gun_min = MIN_KONU_BLOK_DK if tek_brans_aktif else MIN_ANLAMLI_BLOK
+            if kalan_dk < _gun_min:
                 break
             if tek_brans_aktif:
                 # v2.2: mutlak müfredat sırası (sira_no) + rotasyon cezası.
@@ -2338,7 +2477,15 @@ def plan_uret(baglam, referans_tarihi=None):
                 # 15-20 soru kotası) yalnızca sınıf/alan bilgili planlarda
                 # uygulanır; eski planlar özgün davranışını korur.
                 if oge["tur"] == "anlatim" and oge.get("ilk_kez") and tek_brans_aktif:
-                    hedef_soru = min(hedef_soru, 20)
+                    # %0 ilk kavrama 15-20 soru; ancak 20'ye kırpınca konunun
+                    # toplamı içinde <15 soruluk kırıntı kalacaksa tek blokta
+                    # bitir (kırıntı yasağı, FAZ 1.3).
+                    _kota = int(oge["kalan"] or 0)
+                    _ver = min(20, _kota)
+                    _artik = _kota - _ver
+                    if 0 < _artik < MIN_KONU_BLOK_SORU and _kota <= tavan:
+                        _ver = _kota
+                    hedef_soru = min(hedef_soru, _ver)
                 gorev = _soru_sayisi_sigdir(
                     oge["tur"],
                     oge["ders"],
@@ -2360,9 +2507,23 @@ def plan_uret(baglam, referans_tarihi=None):
                     eksikler=oge.get("eksikler"),
                     ilk_kez=bool(oge.get("ilk_kez")),
                     konu_anlatimi_aktif=tek_brans_aktif,
+                    min_soru=(
+                        MIN_KONU_BLOK_SORU
+                        if (tek_brans_aktif and oge["tur"] in ("anlatim", "pes"))
+                        else None
+                    ),
                     deneme_id=oge.get("deneme_id"),
                 )
                 if gorev is None:
+                    continue
+                # v2.3 (FAZ 1.3): ana konu kırıntısı yasak — blok HEM 25 dk
+                # altı HEM 15 soru altı ise güne sıkıştırılmaz (ertesi gün).
+                if (
+                    tek_brans_aktif
+                    and oge["tur"] in ("anlatim", "pes")
+                    and int(gorev.get("tahmini_sure_dk") or 0) < MIN_KONU_BLOK_DK
+                    and int(gorev.get("hedef_soru") or 0) < MIN_KONU_BLOK_SORU
+                ):
                     continue
                 gun_gorev[tarih].append(gorev)
                 gun_dk[tarih] += int(gorev.get("tahmini_sure_dk") or 0)
@@ -2408,6 +2569,11 @@ def plan_uret(baglam, referans_tarihi=None):
                     oge["pay_dk"] = None
                 if oge["tur"] == "tekrar" or oge["kalan"] <= 0:
                     kuyruk.pop(oge_anahtar, None)
+                    # v2.3 (FAZ 1.2): ana konu birimi tamamlandı -> aynı dersin
+                    # bir sonraki alt/konusunu DİNAMİK besle (yeni mod).
+                    if tek_brans_aktif and not tekrar_mi:
+                        ders_kuyrukta[oge["ders"]] = False
+                        _ders_besle(oge["ders"])
                 yerlesti = True
                 break
             if not yerlesti:
@@ -2426,7 +2592,14 @@ def plan_uret(baglam, referans_tarihi=None):
     if karma_tarama_aktif:
         for tarih in gunler:
             kalan_dk = kapasite[tarih] - gun_dk[tarih]
-            if kalan_dk < 45 or not gun_brans_ana[tarih]:
+            # v2.3 (FAZ 1.3): karma tarama yalnızca gün zaten SEYREK ise
+            # (görev < 3) ve en az 60 dk boşsa eklenir; dolu günlerde fazladan
+            # kart üretilmez (haftalık kart bütçesi 28-42 korunur).
+            if (
+                len(gun_gorev[tarih]) >= 3
+                or kalan_dk < 60
+                or not gun_brans_ana[tarih]
+            ):
                 continue
             dk = min(60, int(kalan_dk))
             soru = max(10, min(40, int(dk / 1.5)))
@@ -2491,7 +2664,7 @@ def _soru_sayisi_sigdir(
     tur, ders, makro, mikro, tarih, kalan_soru, kalan_dk,
     kaynak, ogrenci_id, konu_sureleri, alt_konu, pedagoji, alt_sayisi=1,
     sure_dk=None, mikro_hedef=None, kaynaklar=None, tavan=None, eksikler=None,
-    ilk_kez=False, deneme_id=None, konu_anlatimi_aktif=True,
+    ilk_kez=False, deneme_id=None, konu_anlatimi_aktif=True, min_soru=None,
 ):
     """Kalan süreye sığan en büyük soru sayısıyla görevi üretir (yoksa None).
 
@@ -2507,9 +2680,18 @@ def _soru_sayisi_sigdir(
     Adaylar kabadan inceye sıralanır; günün kalan dakikasına sığan EN BÜYÜK
     aday seçilir, böylece kapasite boşa harcanmaz.
     """
+    # v2.3 (FAZ 1.3): ana konu için minimum soru tabanı. Taban, konunun
+    # TOPLAM kalanından büyük olamaz (küçük kalanın bitirilmesine izin verir)
+    # ama büyük bir konudan 15'in altında dilim alınmasını engeller.
+    _taban = MIN_ANLAMLI_BLOK
+    if min_soru not in (None, ""):
+        try:
+            _taban = max(MIN_ANLAMLI_BLOK, min(int(min_soru), int(kalan_soru)))
+        except (TypeError, ValueError):
+            _taban = MIN_ANLAMLI_BLOK
     if tavan in (None, "", 0):
         tavan = gorev_soru_tavani(ders, pedagoji)
-    tavan = max(MIN_ANLAMLI_BLOK, int(tavan))
+    tavan = max(_taban, int(tavan))
     adaylar = []
     for soru in (
         min(tavan, kalan_soru),
@@ -2522,11 +2704,11 @@ def _soru_sayisi_sigdir(
         10,
         MIN_ANLAMLI_BLOK,
     ):
-        if soru < MIN_ANLAMLI_BLOK or soru > kalan_soru or soru > tavan:
+        if soru < _taban or soru > kalan_soru or soru > tavan:
             continue
         if soru not in adaylar:
             adaylar.append(soru)
-    if not adaylar and 0 < kalan_soru < MIN_ANLAMLI_BLOK:
+    if not adaylar and 0 < kalan_soru < _taban:
         adaylar.append(int(kalan_soru))
     for soru in adaylar:
         secili = None

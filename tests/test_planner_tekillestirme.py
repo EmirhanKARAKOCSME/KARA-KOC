@@ -58,6 +58,8 @@ class PlannerTekillestirmeTestleri(unittest.TestCase):
             "alarm_konular": [],
             # Tekrar havuzu bu testlerin kapsamı dışında: veritabanı okumasın.
             "tekrar_entegrasyonu": False,
+            # v2.3: özgün (legacy) planlama davranışını doğrular.
+            "legacy_mod": True,
         }
         baglam.update(ek)
         return baglam

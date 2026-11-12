@@ -22,6 +22,7 @@ from services.topic_progress import (
 from views import (
     admin_panel,
     dashboard,
+    kamp_kokpiti,
     login,
     shared,
     tab_alarms,
@@ -94,6 +95,13 @@ aktif_mufredat_hiyerarsisi = build_student_curriculum(
 
 # Görünümler `main.py` globali okumaz; ihtiyaç duydukları veri bu nesnededir.
 ctx = ViewContext(user=current_user, mufredat=aktif_mufredat_hiyerarsisi)
+
+# ==============================================================================
+# 5b) KAMP MODU (v2.3) — aktifse normal sekmeleri atla, uzay kokpitini aç
+# ==============================================================================
+if current_user.get("rol") != "admin" and st.session_state.get("kamp_aktif"):
+    kamp_kokpiti.render(ctx)
+    st.stop()
 
 # ==============================================================================
 # 6) YÖNETİCİ PANELİ (panel sonunda st.stop() ile öğrenci kokpitime geçilmez)

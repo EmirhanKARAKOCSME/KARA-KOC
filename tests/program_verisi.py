@@ -101,6 +101,9 @@ def baglam(
     """`planner.plan_uret` için gerçek verilerle bağlam kurar."""
     return {
         "ogrenci_id": ogrenci_id,
+        # v2.3: bu test verisi ESKİ motor davranışını doğrular; yeni (her zaman
+        # aktif) sınıf/alan kilidini kapatmak için açık opt-out gerekir.
+        "legacy_mod": True,
         "baslangic": baslangic or REFERANS_TARIH,
         "gun_sayisi": 7,
         "musaitlik": musaitlik

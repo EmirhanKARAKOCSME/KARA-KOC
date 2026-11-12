@@ -111,10 +111,23 @@ def render(ctx, saglik_skoru, delta_yuzde, gercek_orand, tyt_orani, ayt_orani):
             st.session_state.active_user = None
             st.rerun()
 
-    st.title(
-        "🎯 KARAKOÇ YKS Akıllı Koçluk Paneli ("
-        f"{ctx.user['hedef_alan']} - {ctx.user['sinif_seviyesi']})"
-    )
+    _baslik_col, _kamp_col = st.columns([4, 1])
+    with _baslik_col:
+        st.title(
+            "🎯 KARAKOÇ YKS Akıllı Koçluk Paneli ("
+            f"{ctx.user['hedef_alan']} - {ctx.user['sinif_seviyesi']})"
+        )
+    with _kamp_col:
+        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+        # v2.3: sade metalik çerçeveli KAMP MODU giriş butonu.
+        if st.button(
+            "KAMP MODU",
+            key="kamp_modu_giris",
+            help="Bildirimler kapalı, tam odak: KARAKOÇ YKS KAMP",
+            use_container_width=True,
+        ):
+            st.session_state["kamp_aktif"] = True
+            st.rerun()
 
     toplam_alarm_sayisi = sum(len(v) for v in ctx.alarmlar.values())
     ay_adi_kokpit, _ = get_aylik_mufredat_hedevi(ctx.user["sinif_seviyesi"])

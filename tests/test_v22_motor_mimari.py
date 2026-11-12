@@ -350,8 +350,10 @@ class CiftMotorTestleri(_MotorTemel):
         }
 
     def test_01_mayista_ezber_kredi_peksitirme_sira(self):
+        # v2.3: alan bilinmeyen ("Tümü") -> alan filtresi uygulanmaz; böylece
+        # farklı alanlardan Motor1/Motor2 dersleri birlikte test edilir.
         sonuc = self._plan(self._baglam(
-            mufredat=self._mufredat(), sinif_seviyesi="11. Sınıf", alan=None,
+            mufredat=self._mufredat(), sinif_seviyesi="11. Sınıf", alan="Tümü",
             referans_tarihi=MAYIS, gun_sayisi=7, musaitlik_dk=300,
         ))
         ana = self._ana_gorevler(sonuc["gorevler"])

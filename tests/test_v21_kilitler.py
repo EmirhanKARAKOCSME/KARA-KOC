@@ -153,6 +153,8 @@ class V21KilitTestleri(unittest.TestCase):
             "biten_konular": set(),
             "deneme_yanlislari": [],
             "pekistirme_bekleyen": [],
+            # v2.3: özgün (legacy) planlama davranışını doğrular.
+            "legacy_mod": True,
         }
         baglam.update(ek)
         return baglam

@@ -74,6 +74,7 @@ def _bootstrap(yol: str, surum: str) -> bool:
     from services import (
         core_schema,
         gorev_kaynaklari,
+        kamp_motoru,
         planner,
         program_motoru,
         programs,
@@ -97,6 +98,7 @@ def _bootstrap(yol: str, surum: str) -> bool:
         gorev_kaynaklari,
         weekly_report,
         ranking_engine,
+        kamp_motoru,
     )
     for servis in servisler:
         servis.db_yolu_ayarla(yol)
@@ -114,6 +116,7 @@ def _bootstrap(yol: str, surum: str) -> bool:
     gorev_kaynaklari.init_db()    # FAZ 6C: görev <-> kaynak bağları
     weekly_report.init_db()       # FAZ 7: haftalık rapor hedefleri
     ranking_engine.init_db()      # FAZ 8: hedef net tablosu
+    kamp_motoru.init_db()         # v2.3: KARAKOÇ YKS KAMP oturum/dilim
 
     # 4) Program motoru ve alt konu şeması (çekirdek tablolara bağlı).
     program_motoru.init_program_motoru_db(yol)

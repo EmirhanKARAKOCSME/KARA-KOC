@@ -1,6 +1,6 @@
 """Sekme 6 - Haftalık Çalışma Programı."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -22,6 +22,7 @@ from services import task_steps
 from services.topic_progress import (
     gorev_alt_konu_isle,
     gorev_chk_durum_senkron,
+    makro_unite_ilerleme_durumu,
 )
 from views.shared import (
     _gorev_adimlari_senkron,
@@ -360,24 +361,44 @@ def render(ctx):
         )
         st.progress(p_yuzde / 100.0)
 
-        gun_listesi = [
-            "Pazartesi",
-            "Salı",
-            "Çarşamba",
-            "Perşembe",
-            "Cuma",
-            "Cumartesi",
-            "Pazar",
-        ]
+        # v2.3 (FAZ 1.4): gün sekmeleri SABİT Pzt-Paz değil, programdaki GERÇEK
+        # tarih sırasıdır; "Gün 1: Perşembe (12 Kasım)" biçiminde etiketlenir.
+        gun_adlari_tr = {
+            "Monday": "Pazartesi", "Tuesday": "Salı", "Wednesday": "Çarşamba",
+            "Thursday": "Perşembe", "Friday": "Cuma", "Saturday": "Cumartesi",
+            "Sunday": "Pazar",
+        }
+        ay_adlari_tr = {
+            1: "Ocak", 2: "Şubat", 3: "Mart", 4: "Nisan", 5: "Mayıs",
+            6: "Haziran", 7: "Temmuz", 8: "Ağustos", 9: "Eylül",
+            10: "Ekim", 11: "Kasım", 12: "Aralık",
+        }
+        _tarihler = sorted(
+            {str(t)[:10] for t in df_program_full["tarih"].tolist()
+             if pd.notna(t)}
+        )
+        gun_etiketleri = []
+        for _i, _t in enumerate(_tarihler, 1):
+            try:
+                _dt = datetime.strptime(_t, "%Y-%m-%d")
+                _ad = gun_adlari_tr.get(_dt.strftime("%A"), _dt.strftime("%A"))
+                _etiket = "Gün %d: %s (%d %s)" % (
+                    _i, _ad, _dt.day, ay_adlari_tr.get(_dt.month, "")
+                )
+            except (ValueError, TypeError):
+                _etiket = "Gün %d" % _i
+            gun_etiketleri.append((_t, _etiket))
         gun_tablari = st.tabs(
-            gun_listesi,
+            [e[1] for e in gun_etiketleri],
             key="kt_program_gun_tabs",
             on_change="rerun",
         )
 
-        for g_idx, g_ad in enumerate(gun_listesi):
+        for g_idx, (_tarih, _etiket) in enumerate(gun_etiketleri):
             with gun_tablari[g_idx]:
-                df_gunluk = df_program_full[df_program_full["gun"] == g_ad]
+                df_gunluk = df_program_full[
+                    df_program_full["tarih"].astype(str).str[:10] == _tarih
+                ]
                 if not df_gunluk.empty:
                     for _, row in df_gunluk.iterrows():
                         p_turu = row["pedagoji_turu"]
@@ -460,6 +481,18 @@ def render(ctx):
                                     key=prog_anahtar,
                                 )
                                 if chk_g != is_t:
+                                    # v2.3 (FAZ 1.4): genel ders yüzdesi yerine
+                                    # görevin bağlı olduğu MAKRO ÜNİTENİN ilerleme
+                                    # yüzdesi "onceki ➔ sonraki" olarak bildirilir.
+                                    _unite_once = None
+                                    if chk_g:
+                                        try:
+                                            _unite_once = makro_unite_ilerleme_durumu(
+                                                ctx.user["id"], row["ders"],
+                                                row.get("makro_konu"), ctx.mufredat,
+                                            )
+                                        except Exception:  # noqa: BLE001
+                                            _unite_once = None
                                     with get_connection() as conn:
                                         # FAZ 4: planlanan soru ilerlemeye eklenmez.
                                         gorev_alt_konu_isle(row["id"], chk_g)
@@ -470,6 +503,23 @@ def render(ctx):
                                             (1 if chk_g else 0, row["id"]),
                                         )
                                         conn.commit()
+                                    if _unite_once is not None:
+                                        try:
+                                            _unite_sonra = makro_unite_ilerleme_durumu(
+                                                ctx.user["id"], row["ders"],
+                                                row.get("makro_konu"), ctx.mufredat,
+                                            )
+                                        except Exception:  # noqa: BLE001
+                                            _unite_sonra = _unite_once
+                                        set_flash_message(
+                                            "info",
+                                            "Ünite İlerlemesi: %%%d ➔ %%%d (%s)"
+                                            % (
+                                                int(_unite_once),
+                                                int(_unite_sonra),
+                                                str(row.get("makro_konu") or ""),
+                                            ),
+                                        )
                                     st.rerun()
                         st.markdown("---")
                 else:
