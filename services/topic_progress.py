@@ -154,6 +154,123 @@ def soru_borcu_baslat(ogrenci_id, ders, mikro_listesi):
         pass
 
 
+def konu_soru_kotasi(makro, mikro_sayisi, aktif_yanlis=0):
+    """Konunun toplam soru kotası (5'in katı, 40-300 arası).
+
+    TEK kaynak: planlama motoru (`program_motoru.konu_soru_hedefi_hesapla`) ve
+    biten konu tespiti (`biten_konulari_yukle`) aynı formülü kullanır.
+    """
+    makro_kredi = SORU_AGIRLIKLARI.get(makro, 10.0)
+    try:
+        mikro_adet = max(1, int(mikro_sayisi or 1))
+    except (TypeError, ValueError):
+        mikro_adet = 1
+    try:
+        yanlis = max(0, int(aktif_yanlis or 0))
+    except (TypeError, ValueError):
+        yanlis = 0
+    mikro_kredi = makro_kredi / mikro_adet
+    zorluk = 1.0 + min(0.3, 0.05 * yanlis)
+    hedef = int(round(mikro_kredi * 10.0 * zorluk))
+    hedef = max(40, min(300, hedef))
+    return int(round(hedef / 5.0) * 5)
+
+
+def _mufredat_konu_indeksi(aktif_mufredat):
+    """{(ders, mikro): (makro, mikro_sayisi)} indeksi (müfredat sırası korunur)."""
+    indeks = {}
+    for ders, gruplar in (aktif_mufredat or {}).items():
+        if not isinstance(gruplar, dict):
+            continue
+        for makro, mikrolar in gruplar.items():
+            if not isinstance(mikrolar, list):
+                continue
+            adet = len([m for m in mikrolar if m])
+            for mikro in mikrolar:
+                if mikro:
+                    indeks.setdefault((ders, mikro), (makro, max(1, adet)))
+    return indeks
+
+
+def biten_konulari_yukle(ogrenci_id, aktif_mufredat=None, db_path=None):
+    """%100 tamamlanmış (biten) konular: {(ders, mikro_konu)}.
+
+    KURAL: biten konu rutin çalışma programına SONSUZA KADAR eklenmez. Konu
+    yalnızca denemede yanlış çıkarsa sınırlı bir "Eksik Kapatma" görevi olarak
+    plana girer ve o hedef tamamlanınca programdan düşer.
+
+    Bir konu "biten" sayılır ancak ve ancak:
+      1) öğrenme/tekrar adımları bitmiş ve gerçek soru hedefi dolmuş
+         (`task_steps.mikro_konu_ilerleme.tamamlandi`), veya
+      2) alt başlığı olmayan konularda konu 'Biliyorum' işaretlenmiş ve gerçek
+         çözülen soru `konu_soru_kotasi` hedefini karşılamış.
+
+    Alt başlığı olan bir konu, alt başlıklarının TAMAMI tamamlanmadan biten
+    sayılmaz (eksik kalan mikro konu planlanmaya devam eder).
+
+    Tablolar yoksa (eski veritabanı) boş küme döner; planlama bozulmaz.
+    """
+    try:
+        oid = int(ogrenci_id)
+    except (TypeError, ValueError):
+        return set()
+    try:
+        tamamlanan = task_steps.mikro_tamamlananlar(oid)
+    except Exception:  # noqa: BLE001 - tablo yoksa tespit kapalı
+        tamamlanan = set()
+    try:
+        with get_connection(db_path) as c:
+            bilinen = c.execute(
+                "SELECT ders, makro_konu, mikro_konu FROM konu_durumlari_detay"
+                " WHERE ogrenci_id = ? AND durum = 'Biliyorum'",
+                (oid,),
+            ).fetchall()
+            gercek = {
+                (satir[0], satir[1]): int(satir[2] or 0)
+                for satir in c.execute(
+                    "SELECT ders, mikro_konu, COALESCE(SUM(cozulen_soru), 0)"
+                    " FROM calisma_oturumlari WHERE ogrenci_id = ? AND durum = ?"
+                    " GROUP BY ders, mikro_konu",
+                    (oid, "Tamamlandı"),
+                ).fetchall()
+            }
+    except Exception:  # noqa: BLE001 - tablolar yoksa boş küme
+        return set()
+
+    indeks = _mufredat_konu_indeksi(aktif_mufredat)
+    makro_haritasi = {
+        (str(ders), str(mikro)): makro
+        for ders, makro, mikro in bilinen
+        if ders and mikro
+    }
+    adaylar = set(makro_haritasi)
+    adaylar.update({(str(d), str(m)) for d, m, _alt in tamamlanan if d and m})
+
+    sonuc = set()
+    for ders, mikro in adaylar:
+        alts = [a for a in (MIKRO_ALT_KONULAR.get(mikro) or []) if a]
+        if alts:
+            # Tüm alt başlıklar kapanmış olmalı.
+            if not all((ders, mikro, alt) in tamamlanan for alt in alts):
+                continue
+        else:
+            makro, adet = indeks.get(
+                (ders, mikro), (makro_haritasi.get((ders, mikro)), 1)
+            )
+            if int(gercek.get((ders, mikro), 0) or 0) < konu_soru_kotasi(makro, adet):
+                continue
+        sonuc.add((ders, mikro))
+    # KURAL 2 (v2.1): pekiştirme adımı bekleyen konu %100 (biten) sayılmaz;
+    # ilerlemesi %50'de kilitlidir. Pekiştirme tamamlanınca normal akış döner.
+    try:
+        bekleyen = task_steps.pekistirme_bekleyenler(oid)
+    except Exception:  # noqa: BLE001 - tablo yoksa kilit uygulanmaz
+        bekleyen = set()
+    if bekleyen and sonuc:
+        sonuc = {k for k in sonuc if k not in bekleyen}
+    return sonuc
+
+
 def init_alt_konu_db(db_path=None):
     with get_connection(db_path) as conn:
         cur = conn.cursor()

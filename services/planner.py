@@ -24,6 +24,16 @@
   miktarı yeni göreve `kaynak_gorev_id` ile bağlanır; tamamlanmış mikro konu
   yeniden üretilmez.
 - **Ön koşul ağacı korunur.** Ön koşulu tamamlanmamış konuya geçilmez.
+- **Biten konu tekrar etmez (KURAL 1).** %100 tamamlanmış konu rutin programa
+  dönmez; yalnızca denemede yanlış çıkarsa sınırlı bir "Eksik Kapatma" görevi
+  açılır ve hedefi dolunca kart programdan düşer.
+- **Sıfır konu anlatımla başlar (KURAL 2).** Hiç çalışılmamış konunun kartında
+  ilk adım her zaman "Konu Anlatımı (Video/Kaynak)"tır.
+- **Ezber/pekiştirme ayrımı (KURAL 3).** Ezber derslerinde anlatım/okuma süresi
+  uzar, soru yükü azalır; pekiştirme derslerinde anlatım makul kalır ve soru
+  pratiği kolay ➔ orta ➔ zor ilerler.
+- **Günlük ders bölünmesi sınırlıdır (KURAL 4).** 4 saat ve altı çalışmada en
+  fazla 3, müsaitlik ne olursa olsun en fazla 5 farklı ders.
 
 Bu modül Streamlit'e bağımlı değildir.
 """
@@ -48,12 +58,87 @@ VARSAYILAN_GUNLUK_DAKIKA = 360
 MAKS_GUNLUK_DAKIKA = 1440
 MIN_ANLAMLI_BLOK = 5
 MAKS_YENI_MIKRO_GUN = 2
+# Bir dersten bir güne düşebilecek en fazla görev sayısı (ders dengesi).
+MAKS_DERS_GOREV_GUN = 3
+# Günlük soru tavanı: gerçekçi üst sınır (100-400 soru/gün hedefi).
+MAKS_SORU_GUN = 400
 AGIR_DERSLER = ("AYT Matematik", "TYT Matematik", "AYT Geometri", "TYT Geometri")
 PARAGRAF_DAKIKA = 30
 TEKRAR_DAKIKA = 20
 KREDI_MAKS = 100.0
-SORU_CARPANI = 3.0  # toplam soru hedefi = 100 x 3 x normalize kredi
+# Toplam soru hedefi = 100 x carpan x normalize kredi. Gerçekçi günlük hacim
+# (100-400 soru) için 3 yerine 24 kullanılır: bir mikro konunun toplam soru
+# kotası böylece 25-40 bandına oturur (gerçek YKS kitap hacmi). Günlük
+# kapasite her zaman üst sınırdır; kota yalnızca talebi belirler.
+SORU_CARPANI = 24.0
+# Ezber derslerinde soru yükü azaltılır (not/tekrar ağırlığı artar).
+EZBER_SORU_ORANI = 0.6
+EZBER_GOREV_SORU_TAVANI = 25
 VARSAYILAN_DB_YOLU = "yks_veritabani.db"
+
+# --- Biten (%100) konu & "Eksik Kapatma" (KURAL 1) ---------------------------
+# Biten konu rutin programa SONSUZA KADAR eklenmez. Konu yalnızca denemede
+# yanlış çıkarsa SINIRLI bir "Eksik Kapatma" (özel ders) göreviyle girer; hedef
+# soru/tekrar tamamlanınca görev programdan düşer ve bir daha açılmaz.
+TELAFI_ETIKETI = "🎯 Telafi / Eksik Kapatma: "
+# Eski (v2.0) telafi kartı öneki: geriye dönük tanıma için korunur.
+TELAFI_ETIKETI_ESKI = "🩹"
+TELAFI_ISARET = "Eksik Kapatma"
+TELAFI_HEDEF_SORU = 20
+# Deneme yanlışı kaynaklı telafi kotası: yanlış sayısına göre 15-30 soru arası
+# TEK ve SINIRLI bir görev kartı (sonsuz çalışma döngüsünü engeller).
+TELAFI_MIN_SORU = 15
+TELAFI_MAKS_SORU = 30
+
+# --- Bilinmeyen konu akışı (KURAL 2) ----------------------------------------
+# Sıfır ilerlemeli konuda kartın İLK adımı konu anlatımıdır.
+BILINMEYEN_KONU_ADIMI = "Konu Anlatımı (Video/Kaynak)"
+# %0 konunun ilk günü "Konu Anlatımı + İlk Kavrama Testi" tamamlanınca 24-48
+# saat sonrasına "Pekiştirme / Hatırlama Kontrolü (20 Soru)" planlanır; bu ikinci
+# adım tamamlanmadan konunun ilerlemesi %50 üzerine çıkarılmaz.
+PEKISTIRME_SORU = 20
+PEKISTIRME_MIN_SAAT = 24
+PEKISTIRME_MAX_SAAT = 48
+PEKISTIRME_ETIKETI = "🔁 Pekiştirme / Hatırlama Kontrolü"
+
+# --- Günlük farklı ders sayısı (KURAL 4) ------------------------------------
+# 4 saat ve altı çalışmada en fazla 3 farklı ders; müsaitlik ne olursa olsun
+# en fazla 5 farklı ders (4 saati 6 derse bölüp odak dağıtmamak için).
+DERS_LIMIT_ESIK_DK = 240
+DERS_LIMIT_KISA_GUN = 3
+DERS_LIMIT_MAKS_GUN = 5
+# Süre doldurma (KURAL 4): tek bir derse tek günde en fazla 150 dk / 90 soru.
+MAKS_DERS_GUN_DAKIKA = 150
+MAKS_DERS_GUN_SORU = 90
+
+# Günlük mikro rutinler ana ders kotasında sayılır: Paragraf→Türkçe,
+# Problem→Matematik, Geometri 10'lu→Geometri. Anahtar: küçük harf alt metin.
+RUTIN_ANA_DERSLERI = {
+    "paragraf": "TYT Türkçe",
+    "problem": "TYT Matematik",
+    "geometri 10": "TYT Geometri",
+    "geometri 10'lu": "TYT Geometri",
+}
+
+
+def rutin_ana_dersi(mikro, ders=None):
+    """Günlük mikro rutinin ait olduğu ana dersi döndürür (KURAL 4).
+
+    Paragraf → TYT Türkçe, Problem → TYT Matematik, Geometri 10'lu → TYT
+    Geometri. Rutin değilse verilen ders aynen döner. Böylece rutin, ana dersi
+    zaten varsa AYRI bir ders kotası açmaz.
+    """
+    if not mikro:
+        return ders
+    metin = str(mikro).strip().lower()
+    for parca, ana_ders in RUTIN_ANA_DERSLERI.items():
+        if parca in metin:
+            return ana_ders
+    return ders
+
+# --- Pekiştirme pratiği (KURAL 3) -------------------------------------------
+# Pekiştirme derslerinde sorular kolay ➔ orta ➔ zor sırasıyla ilerler.
+ZORLUK_SIRASI = ("kolay", "orta", "zor")
 
 # FAZ 6C: aralıklı tekrar + yanlış soru defteri entegrasyonu.
 MAKS_TEKRAR_GOREV_GUN = 2  # günde en fazla 2 tekrar/defter görevi
@@ -61,6 +146,17 @@ MAKS_TEKRAR_SORU = 10  # tek görevde en fazla 10 kaynak soru
 TEKRAR_DK_PAYI = 0.30  # günün kapasitesinin en fazla %30'u tekrara ayrılır
 MIN_TEKRAR_DK = 15  # tekrar için ayrılacak en az süre (kapasite izin verirse)
 TEKRAR_HEDEF_SORU = 5  # bir aralıklı tekrar kaydının soru hedefi
+
+# Günlük rutin görevler: aynı rutin bir güne en fazla `max_daily_limit` kez
+# yerleştirilir (örn. günde tek "Günlük Paragraf" slotu). Anahtar mikro konu
+# adıdır; istenirse `(ders, mikro konu)` biçiminde ders bazlı da tanımlanır.
+GUNLUK_RUTINLER = {
+    "Günlük Paragraf": {"max_daily_limit": 1},
+}
+
+# "Temel Eksik" (ön koşul) etiketlerinin metin biçimleri.
+TEMEL_EKSIK_AYRACI = " - Eksikler: "
+TEMEL_EKSIK_ESKI_AYRACI = " (Temel Eksik: "
 
 GUN_ADLARI = (
     "Pazartesi",
@@ -160,15 +256,157 @@ _INDEKSLER = (
     " ON calisma_musaitlik(ogrenci_id, gun)",
 )
 
+# KURAL 1 (v2.1): "telafisi kapatıldı" damgası. Biten konu yalnızca bu konuda
+# KAPATILANDAN DAHA YENİ bir denemede (deneme_id > son_kapatilan_deneme_id)
+# yanlış yapılırsa yeniden TEK SEFERLİK telafi kartıyla plana döner.
+_SEMA_TELAFI = """
+CREATE TABLE IF NOT EXISTS telafi_deneme_takibi (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ogrenci_id INTEGER NOT NULL,
+    ders TEXT NOT NULL,
+    mikro_konu TEXT NOT NULL,
+    son_kapatilan_deneme_id INTEGER NOT NULL DEFAULT 0,
+    kapatilma_zamani TEXT,
+    UNIQUE(ogrenci_id, ders, mikro_konu)
+)
+"""
+
+_INDEKSLER_TELAFI = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_telafi_tek"
+    " ON telafi_deneme_takibi(ogrenci_id, ders, mikro_konu)",
+)
+
 
 def init_db():
-    """Müsaitlik tablosunu idempotent kurar (veri silmez)."""
+    """Müsaitlik ve telafi takip tablosunu idempotent kurar (veri silmez)."""
     with _baglanti() as conn:
         with _islem(conn):
             conn.execute(_SEMA)
+            conn.execute(_SEMA_TELAFI)
             for sorgu in _INDEKSLER:
                 conn.execute(sorgu)
+            for sorgu in _INDEKSLER_TELAFI:
+                conn.execute(sorgu)
     return True
+
+
+def telafi_kapatilan_denemeler(ogrenci_id):
+    """Öğrenci için {(ders, mikro): son_kapatilan_deneme_id} haritası.
+
+    Tablo yoksa (eski/test veritabanı) boş sözlük döner; planlama bozulmaz.
+    """
+    sonuc = {}
+    if ogrenci_id in (None, "", 0):
+        return sonuc
+    try:
+        with _baglanti() as conn:
+            satirlar = conn.execute(
+                "SELECT ders, mikro_konu, son_kapatilan_deneme_id"
+                " FROM telafi_deneme_takibi WHERE ogrenci_id = ?",
+                (ogrenci_id,),
+            ).fetchall()
+    except sqlite3.Error:
+        return sonuc
+    for satir in satirlar:
+        try:
+            ders = satir["ders"]
+            mikro = satir["mikro_konu"]
+            deneme_id = int(satir["son_kapatilan_deneme_id"] or 0)
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        if ders and mikro:
+            sonuc[(str(ders), str(mikro))] = deneme_id
+    return sonuc
+
+
+def telafi_deneme_kapat(ogrenci_id, ders, mikro_konu, deneme_id):
+    """Telafi görevi tamamlandığında deneme_id'yi "kapatıldı" olarak işaretler.
+
+    Aynı (ders, mikro) için yalnızca DAHA BÜYÜK deneme_id saklanır; böylece
+    eski bir deneme yeni kapatmayı ezmez. İdempotenttir.
+    """
+    if ogrenci_id in (None, "", 0) or not (ders and mikro_konu):
+        return False
+    try:
+        did = int(deneme_id or 0)
+    except (TypeError, ValueError):
+        did = 0
+    if did <= 0:
+        return False
+    zaman = _zaman_yaz(simdi())
+    try:
+        with _baglanti() as conn:
+            with _islem(conn):
+                mevcut = conn.execute(
+                    "SELECT id, son_kapatilan_deneme_id FROM telafi_deneme_takibi"
+                    " WHERE ogrenci_id = ? AND ders = ? AND mikro_konu = ?",
+                    (ogrenci_id, str(ders), str(mikro_konu)),
+                ).fetchone()
+                if mevcut is None:
+                    conn.execute(
+                        "INSERT INTO telafi_deneme_takibi (ogrenci_id, ders,"
+                        " mikro_konu, son_kapatilan_deneme_id, kapatilma_zamani)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        (ogrenci_id, str(ders), str(mikro_konu), did, zaman),
+                    )
+                elif did > int(mevcut["son_kapatilan_deneme_id"] or 0):
+                    conn.execute(
+                        "UPDATE telafi_deneme_takibi SET son_kapatilan_deneme_id = ?,"
+                        " kapatilma_zamani = ? WHERE id = ?",
+                        (did, zaman, mevcut["id"]),
+                    )
+    except sqlite3.Error:
+        return False
+    return True
+
+
+def biten_konu_deneme_hedefleri(deneme_yanlislari, biten, kapatilan):
+    """Biten konularda YENİ deneme yanlışlarını tespit eder (KURAL 1).
+
+    `deneme_yanlislari`: `[{'ders','konu','deneme_id','yanlis_adedi'}, ...]`.
+    `biten`: {(ders, mikro_konu)} — %100 biten konular.
+    `kapatilan`: {(ders, mikro_konu): son_kapatilan_deneme_id}.
+
+    Dönen: {(ders, mikro_konu): (en_yeni_deneme_id, toplam_yanlis)}.
+    Yalnızca `deneme_id > son_kapatilan_deneme_id` olan yanlışlar alınır;
+    böylece kapatılmış bir deneme bir sonraki planda yeniden tetiklenmez.
+    """
+    sonuc = {}
+    if not deneme_yanlislari:
+        return sonuc
+    for kayit in deneme_yanlislari:
+        if not isinstance(kayit, dict):
+            continue
+        ders = str(kayit.get("ders") or "").strip()
+        konu = str(
+            kayit.get("konu")
+            or kayit.get("konu_adi")
+            or kayit.get("mikro_konu")
+            or ""
+        ).strip()
+        if not (ders and konu):
+            continue
+        if (ders, konu) not in biten:
+            continue
+        try:
+            did = int(kayit.get("deneme_id") or 0)
+        except (TypeError, ValueError):
+            did = 0
+        if did <= 0:
+            continue
+        esik = int((kapatilan or {}).get((ders, konu), 0) or 0)
+        if did <= esik:
+            continue
+        try:
+            yanlis = max(0, int(kayit.get("yanlis_adedi") or kayit.get("yanlis") or 0))
+        except (TypeError, ValueError):
+            yanlis = 0
+        mevcut = sonuc.get((ders, konu))
+        if mevcut is None:
+            sonuc[(ders, konu)] = (did, yanlis)
+        else:
+            sonuc[(ders, konu)] = (max(mevcut[0], did), max(mevcut[1], yanlis))
+    return sonuc
 
 
 
@@ -282,11 +520,14 @@ def kredi_normalize(kredi):
     return max(0.0, min(1.0, deger / KREDI_MAKS))
 
 
-def makro_soru_hedefi(kredi, carpan=SORU_CARPANI):
-    """Makro konu toplam soru hedefi = 100 x 3 x normalize(kredi).
+def makro_soru_hedefi(kredi, carpan=None):
+    """Makro konu toplam soru hedefi = 100 x carpan x normalize(kredi).
 
-    Eski 40 soruluk yapay minimum kaldırıldı; alt sınır yoktur.
+    Eski 40 soruluk yapay minimum kaldırıldı; alt sınır yoktur. `carpan`
+    verilmezse modül sabiti (`SORU_CARPANI`) kullanılır.
     """
+    if carpan is None:
+        carpan = SORU_CARPANI
     normalize = kredi_normalize(kredi)
     hedef = 100.0 * float(carpan) * normalize
     return max(0, int(round(hedef / 5.0) * 5))
@@ -348,7 +589,7 @@ def mikro_soru_hedefi(makro_kredi, mikrolar, mikro, konu_sureleri=None,
 # ==============================================================================
 # PLAN MOTORU
 # ==============================================================================
-MAKS_GOREV_SORU = 20
+MAKS_GOREV_SORU = 40
 
 
 def _tarih_oku(deger):
@@ -380,6 +621,28 @@ def _mikro_hedef(ders, makro, mikro, mufredat, soru_agirliklari, konu_sureleri):
     if not mikrolar or mikro not in mikrolar:
         return makro_soru_hedefi(kredi)
     return mikro_soru_hedefi(kredi, mikrolar, mikro, konu_sureleri)
+
+
+# ==============================================================================
+# PEKİŞTİRME / EZBER DENGESİ
+# ==============================================================================
+def ders_soru_orani(ders, pedagoji=None):
+    """Dersin soru yükü oranı (ezber 0.6, pekiştirme 1.0).
+
+    Ezber ağırlıklı derslerde (tarih, biyoloji, felsefe ...) soru sayısı
+    azaltılır; kazanılan süre not/tekrar adımına gider. Pekiştirme
+    derslerinde (matematik, geometri, fizik, dil bilgisi) tam kota korunur.
+    """
+    if task_steps.ders_ezber_mi(ders, pedagoji):
+        return EZBER_SORU_ORANI
+    return 1.0
+
+
+def gorev_soru_tavani(ders, pedagoji=None):
+    """Tek görevde istenebilecek en fazla soru (ezberde daha düşük)."""
+    if task_steps.ders_ezber_mi(ders, pedagoji):
+        return EZBER_GOREV_SORU_TAVANI
+    return MAKS_GOREV_SORU
 
 
 def _on_kosul_hazir(mikro, bilinen, kurallar, derinlik=0):
@@ -434,12 +697,16 @@ def _gorev_turu_tahmin(gorev):
 
 
 def mikro_gorev_tanimi(ana_konu, mikro, soru, gorev_turu="anlatim"):
-    """Tek mikro konuya ait görev metni (ana konu ➔ mikro konu)."""
+    """Tek mikro konuya ait görev metni (ana konu ➔ mikro konu).
+
+    KURAL 2: öğrenme görevinin İLK adımı konu anlatımıdır; kart metni
+    "Konu Anlatımı (Video/Kaynak)" ile başlar.
+    """
     if gorev_turu == "anlatim":
         kuyruk = ", ardından %d soru çöz" % int(soru) if int(soru or 0) > 0 else ""
         return (
-            "📌 %s ➔ %s: konu anlatımını izle ve kısa özet çıkar%s."
-            % (ana_konu, mikro, kuyruk)
+            "📌 %s ➔ %s ➔ %s: izle / oku ve kısa özet çıkar%s."
+            % (BILINMEYEN_KONU_ADIMI, ana_konu, mikro, kuyruk)
         )
     if gorev_turu == "tekrar":
         return "🔄 %s ➔ %s: özet notlarını oku." % (ana_konu, mikro)
@@ -557,6 +824,9 @@ def _gorev_uret(
     sure_dk=None,
     mikro_hedef=None,
     kaynaklar=None,
+    eksikler=None,
+    ilk_kez=False,
+    deneme_id=None,
 ):
     """Görev sözlüğü + alt adımlar + planlanan süre.
 
@@ -568,8 +838,20 @@ def _gorev_uret(
     FAZ 6C: `kaynaklar` görevin beslendiği kayıtları taşır
     (`[{'tur': 'yanlis_soru'|'tekrar_kaydi', 'id': N}]`); görev tamamlanınca
     bağlı kayıtlar ilerletilir.
+    `eksikler`: eksik ön koşul ("Temel Eksik") listesi. Kart etiketine
+    "Polinomlar - Eksikler: Fonksiyonlar, Çarpanlara Ayırma" biçiminde eklenir;
+    her ön koşul için AYRI görev kartı üretilmez.
+    `ilk_kez`: konuya hiç çalışılmamış (sıfır ilerleme). Bu durumda kartın
+    İLK adımı konu anlatımıdır: "Konu Anlatımı (Video/Kaynak)".
+    `tur="telafi"`: biten konuda deneme yanlışı için açılan sınırlı
+    "Eksik Kapatma" görevi (bkz. `telafi_hedefi`).
     """
     etiket = "%s ➔ %s" % (mikro, alt_konu) if alt_konu else mikro
+    if eksikler:
+        etiket = "%s%s%s" % (etiket, TEMEL_EKSIK_AYRACI, ", ".join(eksikler))
+    # "Eksikler: ..." etiketinden sonra ikinci bir iki nokta olmaması için
+    # birleşik etiketlerde ayırıcı olarak "→" kullanılır.
+    ayirici = " →" if eksikler else ":"
     if tur == "tekrar":
         tanim = "🔄 %s: özet notlarını oku, hatırlatma sorularını çöz." % etiket
         soru = min(TEKRAR_HEDEF_SORU, max(0, int(soru or TEKRAR_HEDEF_SORU)))
@@ -581,19 +863,42 @@ def _gorev_uret(
         )
         pedagoji = "Tekrar"
     elif tur == "devir":
-        tanim = "➡️ %s: geçen programdan kalan %d soruyu çöz." % (etiket, soru)
+        tanim = "📌 %s konusundan %d soru çöz." % (etiket, soru)
     elif tur == "alarm":
         tanim = (
-            "🔁 %s: denemede yanlış yaptığın soruları incele ve %d soru çöz."
-            % (etiket, soru)
+            "🔁 %s%s denemede yanlış yaptığın soruları incele ve %d soru çöz."
+            % (etiket, ayirici, soru)
         )
     elif tur == "anlatim":
+        if ilk_kez:
+            # KURAL 2: sıfır ilerlemeli konuda kartın ilk adımı konu anlatımıdır.
+            tanim = (
+                "📌 %s ➔ %s: izle / oku ve kısa özet çıkar, ardından %d soru çöz."
+                % (BILINMEYEN_KONU_ADIMI, etiket, soru)
+            )
+        else:
+            tanim = (
+                "📌 %s%s konu anlatımını izle ve kısa özet çıkar, ardından %d soru çöz."
+                % (etiket, ayirici, soru)
+            )
+    elif tur == "telafi":
+        # KURAL 1: biten konu yalnızca deneme yanlışıyla, sınırlı bir özel
+        # ders/eksik kapatma görevi olarak plana döner.
         tanim = (
-            "📌 %s: konu anlatımını izle ve kısa özet çıkar, ardından %d soru çöz."
-            % (etiket, soru)
+            "%s%s konusunda denemede yanlış yaptığın yerleri tekrar et ve"
+            " %d soru çöz." % (TELAFI_ETIKETI, etiket, soru)
         )
+        pedagoji = "Tekrar"
+    elif tur == "pekistirme":
+        # KURAL 2: %0 konunun ilk gününü takiben 24-48 saat sonrasına planlanan
+        # "Pekiştirme / Hatırlama Kontrolü (20 Soru)" kartı.
+        tanim = (
+            "%s (%d Soru): %s konusunu hatırla ve %d soru çöz."
+            % (PEKISTIRME_ETIKETI, PEKISTIRME_SORU, etiket, soru)
+        )
+        pedagoji = "Pekiştirme"
     else:
-        tanim = "🧩 %s: %d soru çöz." % (etiket, soru)
+        tanim = "📌 %s konusundan %d soru çöz." % (etiket, soru)
     gorev = {
         "ders": ders,
         "makro_konu": makro,
@@ -608,6 +913,26 @@ def _gorev_uret(
     }
     if kaynaklar:
         gorev["kaynaklar"] = list(kaynaklar)
+    if eksikler:
+        # Kart açıklamasında birleştirilen ön koşullar (ayrı kart üretilmez).
+        gorev["eksik_konular"] = list(eksikler)
+    if tur == "telafi":
+        # KURAL 1: telafi kartı; veritabanına yazılmayan ama plan içinde
+        # tanınan işaretler (yeniden planlamada metin öneki de kullanılır).
+        gorev["eksik_kapatma"] = True
+        gorev["deneme_tekrari"] = True
+        # Tetikleyen deneme_id görev meta verisine kaydedilir (KURAL 1 v2.1);
+        # telafi tamamlanınca bu deneme "kapatıldı" olarak işaretlenir.
+        try:
+            if deneme_id not in (None, "", 0):
+                gorev["deneme_id"] = int(deneme_id)
+        except (TypeError, ValueError):
+            pass
+    if tur == "anlatim" and ilk_kez:
+        # KURAL 2: sıfır ilerlemeli konu -> ilk adım konu anlatımı.
+        gorev["ilk_kez_konu"] = True
+    if tur == "pekistirme":
+        gorev["pekistirme"] = True
     gorev["mikro_hedef_soru"] = int(mikro_hedef or gorev["hedef_soru"] or 0)
     if sure_dk not in (None, "", 0):
         gorev["konu_suresi_dk"] = int(sure_dk)
@@ -625,6 +950,443 @@ def _gorev_uret(
     )
 
 
+def _gorev_metnini_tamamla(gorev, etiket):
+    """Soru görevlerinin metnini hedef ve tahmini süreyle tamamlar.
+
+    Eski "geçen programdan kalan X soru" ifadesi kaldırıldı; görev metni
+    her zaman mikro konu (varsa alt başlık) + soru sayısı + tahmini süre
+    biçimindedir: "📌 <alt başlık> konusundan N soru çöz (~M dk)."
+    """
+    if not gorev or gorev.get("gorev_turu") not in (None, "", "soru"):
+        return gorev
+    soru = int(gorev.get("hedef_soru") or 0)
+    if soru <= 0:
+        return gorev
+    # Devam kartlarında da "Eksikler: ..." notu korunur (bkz. `eksikler`).
+    eksikler = gorev.get("eksik_konular") or []
+    if eksikler:
+        etiket = "%s%s%s" % (etiket, TEMEL_EKSIK_AYRACI, ", ".join(eksikler))
+    dk = int(gorev.get("tahmini_sure_dk") or 0)
+    if dk > 0:
+        gorev["gorev_tanimi"] = (
+            "📌 %s konusundan %d soru çöz (~%d dk)." % (etiket, soru, dk)
+        )
+    else:
+        gorev["gorev_tanimi"] = "📌 %s konusundan %d soru çöz." % (etiket, soru)
+    return gorev
+
+
+
+
+def rutin_gunluk_limiti(mikro, ders=None):
+    """Günlük rutin görevin bir güne kaç kez yerleşebileceğini döndürür.
+
+    `GUNLUK_RUTINLER` içinde önce `(ders, mikro konu)`, sonra yalnızca
+    `mikro konu` anahtarı aranır. Rutin olmayan görevler için `None` döner
+    (limit uygulanmaz). Varsayılan limit `max_daily_limit = 1`'dir: günlük
+    rutin (örn. "Günlük Paragraf") günde TEK slota oturur.
+    """
+    if not mikro:
+        return None
+    kural = None
+    if ders is not None:
+        kural = GUNLUK_RUTINLER.get((ders, mikro))
+    if kural is None:
+        kural = GUNLUK_RUTINLER.get(mikro)
+    if kural is None and ders is not None:
+        for anahtar, aday in GUNLUK_RUTINLER.items():
+            if isinstance(anahtar, tuple) and len(anahtar) >= 2 and anahtar[1] == mikro:
+                kural = aday
+                break
+    if kural is None:
+        return None
+    try:
+        return max(0, int(kural.get("max_daily_limit", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def gunluk_tekillestir(gorevler, ana_konu_tekillestir=True):
+    """Aynı gün içindeki görev tekrarlarını ayıklar (deduplication).
+
+    Kurallar:
+      1) Aynı gün + aynı ders + aynı GÖREV (mikro konu / alt konu / tür)
+         yalnızca bir kez planlanır. Farklı mikro konular (FAZ 5D) korunur.
+      2) Günlük rutin görevler (örn. "Günlük Paragraf") gün başına en fazla
+         `max_daily_limit` slot alır (bkz. `GUNLUK_RUTINLER`).
+      3) `ana_konu_tekillestir=True` ise aynı gün + aynı ders + aynı ANA KONU
+         için ikinci bir kart üretilmez. Yedek motorlar ana konuyu mikro
+         konulara bölerek aynı güne birden çok kart yazabildiği için bu kural
+         yalnızca akıllı planlayıcıda ve motor çıktısının son süzgecinde
+         (`ana_konu_tekillestir=False`) kapalı tutulur.
+
+    Sıra korunur: gün içinde İLK gelen görev tutulur. Fonksiyon idempotenttir;
+    ikinci kez uygulanması listeyi değiştirmez.
+    """
+    sonuc = []
+    gorulen = set()
+    rutin_sayaci = {}
+    gun_konu = {}
+    for gorev in gorevler or []:
+        if not isinstance(gorev, dict):
+            continue
+        tarih = gorev.get("tarih") or gorev.get("gun")
+        ders = gorev.get("ders")
+        ana = gorev.get("mikro_konu")
+        alt = gorev.get("alt_konu")
+        tur = gorev.get("pedagoji_turu") or gorev.get("gorev_turu") or ""
+        mikro_anahtar = (
+            tarih,
+            ders,
+            ana,
+            alt,
+            tur,
+            gorev.get("kaynak_gorev_id"),
+        )
+        if mikro_anahtar in gorulen:
+            continue
+        limit = rutin_gunluk_limiti(ana, ders)
+        if limit is None:
+            anahtar = (tarih, ders, ana)
+            if ana_konu_tekillestir and anahtar in gun_konu:
+                continue
+            gun_konu[anahtar] = True
+        else:
+            anahtar = (tarih, ders, ana)
+            if rutin_sayaci.get(anahtar, 0) >= limit:
+                continue
+            rutin_sayaci[anahtar] = rutin_sayaci.get(anahtar, 0) + 1
+        gorulen.add(mikro_anahtar)
+        sonuc.append(gorev)
+    return sonuc
+
+
+def gunluk_ders_limiti(kapasite_dk):
+    """Bir güne atanabilecek FARKLI ders sayısı üst sınırı (KURAL 4).
+
+    - 4 saat (240 dk) ve altı günlük çalışmada en fazla 3 farklı ders: 4 saat
+      6 derse bölünüp odak dağıtılmaz.
+    - Müsaitlik ne olursa olsun en fazla 5 farklı ders.
+    - Dinlenme gününde (0 dk) ders planlanmaz.
+    """
+    try:
+        dk = int(kapasite_dk or 0)
+    except (TypeError, ValueError):
+        dk = 0
+    if dk <= 0:
+        return 0
+    if dk <= DERS_LIMIT_ESIK_DK:
+        return DERS_LIMIT_KISA_GUN
+    return DERS_LIMIT_MAKS_GUN
+
+
+def gunluk_ders_siniri_uygula(gorevler, musaitlik=None):
+    """Görev listesinde günlük FARKLI ders sayısını sınırlar (KURAL 4).
+
+    Yedek motorlar blok sayısına göre plan ürettiği için aynı güne çok sayıda
+    ders düşebilir; bu süzgeç gün içinde İLK gelen görevleri (motorun öncelik
+    sırası) korur. Müsaitlik verilmezse varsayılan günlük süre kullanılır.
+    Günlük rutinler de bir ders sayılır (TYT Türkçe paragraf dahil).
+    """
+    musaitlik = musaitlik or {}
+    sonuc = []
+    gun_ders = {}
+    for gorev in gorevler or []:
+        if not isinstance(gorev, dict):
+            continue
+        tarih = gorev.get("tarih") or gorev.get("gun")
+        ders = gorev.get("ders")
+        if tarih is None or not ders:
+            sonuc.append(gorev)
+            continue
+        anahtar = str(tarih)
+        try:
+            kapasite = gun_musaitligi(_tarih_oku(tarih), musaitlik)
+        except (TypeError, ValueError):
+            kapasite = VARSAYILAN_GUNLUK_DAKIKA
+        # KURAL 4: rutinler (Paragraf/Problem/Geometri) ana ders kotasında sayılır.
+        etkin_ders = rutin_ana_dersi(gorev.get("mikro_konu"), ders)
+        dersler = gun_ders.setdefault(anahtar, set())
+        if etkin_ders not in dersler and len(dersler) >= gunluk_ders_limiti(kapasite):
+            continue
+        dersler.add(etkin_ders)
+        sonuc.append(gorev)
+    return sonuc
+
+
+def _gun_anahtari(gorev):
+    return str(gorev.get("tarih") or gorev.get("gun") or "")
+
+
+def _ders_oncelik_puani(gorev):
+    """Ders/görev öncelik puanı (KURAL 4 süre doldurma sıralaması).
+
+    Düşük puan = daha öncelikli: 1) Kırmızı/Siyah/Mor alarm, 2) Deneme
+    telafisi, 3) Ön koşul eksikliği, 4) Müfredat ağırlığı (varsayılan).
+    """
+    if telafi_gorevi_mi(gorev):
+        return 2
+    if gorev.get("eksik_konular"):
+        return 3
+    pedagoji = str(gorev.get("pedagoji_turu") or "")
+    tanim = str(gorev.get("gorev_tanimi") or "")
+    if "🔁" in tanim or pedagoji == "Tekrar":
+        # Tekrar/defter/alarm kartları yüksek öncelikli sayılır.
+        return 1
+    return 4
+
+
+def gunluk_ders_doldur(gorevler, musaitlik=None):
+    """KURAL 4: günlük farklı ders limitini uygular ve süreyi doldurur.
+
+    - Günlük aday ders havuzu limitten fazlaysa, dersler öncelik puanına göre
+      (alarm > deneme telafisi > ön koşul eksiği > müfredat ağırlığı) sıralanır;
+      en öncelikli `N` ders tutulur, diğer derslerin görevleri elenir.
+    - Boşa çıkan süre, tutulan derslerin görev hacmi artırılarak doldurulur;
+      ancak tek bir derse tek günde en fazla `MAKS_DERS_GUN_DAKIKA` (150 dk) ve
+      `MAKS_DERS_GUN_SORU` (90 soru) uygulanır.
+
+    Girdi listesi değiştirilmez; yeni liste döner. Rutinler (Paragraf/Problem/
+    Geometri) ana ders kotasında sayılır.
+    """
+    musaitlik = musaitlik or {}
+    # 1) Gün bazında grupla.
+    gunler = {}
+    sira = {}
+    for idx, gorev in enumerate(gorevler or []):
+        if not isinstance(gorev, dict):
+            continue
+        anahtar = _gun_anahtari(gorev)
+        gunler.setdefault(anahtar, []).append((idx, gorev))
+        sira[idx] = gorev
+
+    tutulan_idx = set()
+    for anahtar, kayitlar in gunler.items():
+        try:
+            tarih = _tarih_oku(anahtar)
+            kapasite = gun_musaitligi(tarih, musaitlik)
+        except (TypeError, ValueError):
+            kapasite = VARSAYILAN_GUNLUK_DAKIKA
+        limit = gunluk_ders_limiti(kapasite)
+        if limit <= 0:
+            continue
+        # 2) Ders bazında en iyi (en düşük) öncelik puanı.
+        ders_puan = {}
+        for _idx, gorev in kayitlar:
+            ders = rutin_ana_dersi(gorev.get("mikro_konu"), gorev.get("ders"))
+            if not ders:
+                continue
+            puan = _ders_oncelik_puani(gorev)
+            if ders not in ders_puan or puan < ders_puan[ders]:
+                ders_puan[ders] = puan
+        # 3) En öncelikli N dersi seç (eşitlikte ilk görülme sırası korunur).
+        secilen_dersler = set(
+            d
+            for d, _p in sorted(ders_puan.items(), key=lambda c: (c[1],))[:limit]
+        )
+        # 4) Seçilmeyen derslerin görevlerini ele; tutulanları işaretle.
+        for idx, gorev in kayitlar:
+            ders = rutin_ana_dersi(gorev.get("mikro_konu"), gorev.get("ders"))
+            if not ders or ders in secilen_dersler:
+                tutulan_idx.add(idx)
+
+    # 5) Tutulan görevleri sırayla koru.
+    sonuc = [sira[idx] for idx in sorted(tutulan_idx) if idx in sira]
+
+    # 6) Tek ders tavanı: aynı gün + ders için 150 dk / 90 soru aşılırsa küçült.
+    gun_ders_soru, gun_ders_dk = {}, {}
+    for gorev in sonuc:
+        ders = rutin_ana_dersi(gorev.get("mikro_konu"), gorev.get("ders"))
+        if not ders:
+            continue
+        anahtar = (_gun_anahtari(gorev), ders)
+        hedef = int(gorev.get("hedef_soru") or 0)
+        sure = int(gorev.get("tahmini_sure_dk") or 0)
+        kalan_soru = MAKS_DERS_GUN_SORU - gun_ders_soru.get(anahtar, 0)
+        kalan_dk = MAKS_DERS_GUN_DAKIKA - gun_ders_dk.get(anahtar, 0)
+        if hedef > kalan_soru:
+            gorev["hedef_soru"] = max(0, kalan_soru)
+        if sure > kalan_dk and kalan_dk > 0:
+            # Süre tavanı: soru hacmini de orantılı düşür.
+            oran = float(kalan_dk) / float(sure)
+            gorev["hedef_soru"] = min(
+                int(gorev.get("hedef_soru") or 0),
+                max(0, int(round(int(gorev.get("hedef_soru") or 0) * oran))),
+            )
+            gorev["tahmini_sure_dk"] = kalan_dk
+        gun_ders_soru[anahtar] = gun_ders_soru.get(anahtar, 0) + int(
+            gorev.get("hedef_soru") or 0
+        )
+        gun_ders_dk[anahtar] = gun_ders_dk.get(anahtar, 0) + int(
+            gorev.get("tahmini_sure_dk") or 0
+        )
+    return sonuc
+
+
+def temel_eksik_ayir(konu):
+    """Alarm konusundan hedef konuyu ve eksik ön koşulları ayırır.
+
+    Desteklenen biçimler:
+        "Polinomlar - Eksikler: Fonksiyonlar, Çarpanlara Ayırma"
+        "Polinomlar (Temel Eksik: Fonksiyonlar)"
+    Dönen değer: `(hedef_konu, [eksik, ...])`. Etiket yoksa eksik listesi boştur.
+    """
+    metin = " ".join(str(konu or "").split())
+    if not metin:
+        return "", []
+    for ayrac in (TEMEL_EKSIK_AYRACI.strip(), TEMEL_EKSIK_ESKI_AYRACI.strip()):
+        if ayrac in metin:
+            hedef, kalan = metin.split(ayrac, 1)
+            kalan = kalan.strip().rstrip(")")
+            eksikler = [
+                parca.strip(" *'\"")
+                for parca in kalan.split(",")
+                if parca.strip(" *'\"")
+            ]
+            return hedef.strip(), eksikler
+    return metin, []
+
+
+def telafi_gorevi_mi(gorev):
+    """Görev bir "Eksik Kapatma" (biten konu telafisi) kartı mı? (KURAL 1)
+
+    Kart metni veritabanına yazılıp geri okunduğunda `eksik_kapatma` alanı
+    taşınmaz; bu yüzden hem yeni (`🎯 Telafi / Eksik Kapatma:`), hem eski
+    (`🩹`) metin önekleri hem de "Eksik Kapatma" işareti tanınır.
+    """
+    if not isinstance(gorev, dict):
+        return False
+    if gorev.get("eksik_kapatma"):
+        return True
+    metin = str(gorev.get("gorev_tanimi") or "")
+    if metin.startswith(TELAFI_ETIKETI) or metin.startswith(TELAFI_ETIKETI_ESKI):
+        return True
+    return TELAFI_ISARET in metin
+
+
+def telafi_hedefi(ders, ana, pedagoji=None, yanlis=0):
+    """Biten konuda deneme yanlışı için açılan telafi görevinin soru hedefi.
+
+    Hedef bilinçli olarak SINIRLIDIR: konu zaten %100 bitmiştir, amaç yeni
+    konu öğrenmek değil denemede kaçan soruları kapatmaktır.
+
+    Deneme yanlışı sayısı verilirse kota 15-30 soru arasında ölçeklenir:
+    yanlış arttıkça telafi hacmi artar ama tek kartla sınırlı kalır. Yanlış
+    bilgisi yoksa (alarm tabanlı eski akış) üst sınır `TELAFI_HEDEF_SORU`'dur.
+    """
+    tavan = gorev_soru_tavani(ders, pedagoji)
+    try:
+        y = max(0, int(yanlis or 0))
+    except (TypeError, ValueError):
+        y = 0
+    hedef = TELAFI_MIN_SORU + min(TELAFI_MAKS_SORU - TELAFI_MIN_SORU, y * 3)
+    if y <= 0:
+        # Eski davranış: deneme yanlışı sayısı bilinmiyorsa makul varsayılan.
+        hedef = min(hedef, TELAFI_HEDEF_SORU)
+    return max(MIN_ANLAMLI_BLOK, min(int(tavan), int(hedef)))
+
+
+def biten_konu_gorevi_mi(gorev):
+    """Görev, biten konunun RUTİN (tekrar) kartı mı? (KURAL 1)
+
+    Muhafaza edilenler:
+      - deneme yanlışından doğan "Eksik Kapatma" (telafi) kartları,
+      - günlük rutinler (örn. "Günlük Paragraf"),
+      - tekrar görevleri (aralıklı tekrar takvimi ayrı bir pedagojik akıştır).
+    """
+    if not isinstance(gorev, dict):
+        return False
+    if telafi_gorevi_mi(gorev):
+        return False
+    if rutin_gunluk_limiti(gorev.get("mikro_konu"), gorev.get("ders")) is not None:
+        return False
+    if str(gorev.get("pedagoji_turu") or "") == "Tekrar":
+        return False
+    return True
+
+
+def biten_konu_suzgeci(gorevler, biten_konular):
+    """Biten (%100) konuların rutin görevlerini listeden ayıklar (KURAL 1).
+
+    `biten_konular` (ders, mikro konu) çiftlerinden oluşur (bkz.
+    `topic_progress.biten_konulari_yukle`). Konu yalnızca denemede yanlış
+    çıkarsa telafi kartıyla plana döner; o kart süzgeçten etkilenmez.
+    """
+    biten = {(str(d), str(m)) for d, m in (biten_konular or ()) if d and m}
+    if not biten:
+        return list(gorevler or [])
+    sonuc = []
+    for gorev in gorevler or []:
+        if not isinstance(gorev, dict):
+            continue
+        ders = gorev.get("ders")
+        ana = gorev.get("mikro_konu")
+        if (
+            ders
+            and ana
+            and (str(ders), str(ana)) in biten
+            and biten_konu_gorevi_mi(gorev)
+        ):
+            continue
+        sonuc.append(gorev)
+    return sonuc
+
+
+def telafi_kapsanan_konular(onceki_gorevler):
+    """Daha önce "Eksik Kapatma" kartı açılmış (ders, ana konu) çiftleri.
+
+    Tamamlanmış telafi görevi hedefi kapattığı için bir daha açılmaz;
+    tamamlanmamış görev DEVİR katmanıyla devam eder (yeni kart üretilmez).
+    """
+    sonuc = set()
+    for gorev in onceki_gorevler or []:
+        if not telafi_gorevi_mi(gorev):
+            continue
+        ders = gorev.get("ders")
+        ana = gorev.get("mikro_konu")
+        if ders and ana:
+            sonuc.add((str(ders), str(ana)))
+    return sonuc
+
+
+def _alarm_gruplari(alarmlar, bilinen):
+    """Alarm listesini (ders, hedef konu) bazında tekilleştirir.
+
+    Aynı hedef konu için birden fazla uyarı -- özellikle birden fazla
+    "Temel Eksik" -- TEK gruba indirilir; eksik listesi sırası korunarak
+    birleştirilir. Böylece her ön koşul için ayrı görev kartı oluşmaz.
+
+    Dönen liste: `[(ders, hedef_konu, [eksik, ...], bilinen_mi), ...]`
+    """
+    gruplar, sira = {}, []
+    for alarm in alarmlar or []:
+        if not isinstance(alarm, dict):
+            continue
+        ders = (alarm.get("ders") or "").strip()
+        ham = alarm.get("hedef_konu") or alarm.get("konu") or alarm.get("mikro")
+        ana, ayrilan = temel_eksik_ayir(ham)
+        if not (ders and ana):
+            continue
+        eksikler = []
+        for kaynak in (alarm.get("eksikler") or [], ayrilan):
+            for eksik in kaynak:
+                eksik = str(eksik or "").strip()
+                if eksik and eksik not in eksikler:
+                    eksikler.append(eksik)
+        anahtar = (ders, ana)
+        grup = gruplar.get(anahtar)
+        if grup is None:
+            grup = {"ders": ders, "ana": ana, "eksikler": [], "bilinen": ana in (bilinen or set())}
+            gruplar[anahtar] = grup
+            sira.append(anahtar)
+        for eksik in eksikler:
+            if eksik not in grup["eksikler"]:
+                grup["eksikler"].append(eksik)
+    return [
+        (gruplar[anahtar]["ders"], gruplar[anahtar]["ana"],
+         gruplar[anahtar]["eksikler"], gruplar[anahtar]["bilinen"])
+        for anahtar in sira
+    ]
 
 
 def _tekrar_dk_limiti(kapasite):
@@ -837,6 +1599,52 @@ def plan_uret(baglam):
     except (TypeError, ValueError):
         paragraf_soru = 20
     onceki = list(baglam.get("onceki_gorevler") or [])
+    # KURAL 1: %100 biten konular rutin programa geri dönmez. Biten konu
+    # yalnızca denemede yanlış çıkarsa sınırlı bir "Eksik Kapatma" görevi alır.
+    biten = {
+        (str(ders), str(ana))
+        for ders, ana in (baglam.get("biten_konular") or ())
+        if ders and ana
+    }
+    # Daha önce telafi kartı açılan konular (tamamlanmışsa yeniden açılmaz,
+    # tamamlanmamışsa devir katmanıyla devam eder).
+    telafi_kapsanan = telafi_kapsanan_konular(onceki)
+    telafi_gorulen = set()
+    # KURAL 1 (v2.1): deneme_id tabanlı telafi döngüsü. DB'deki kalıcı
+    # "kapatıldı" damgaları + aktif programdaki TAMAMLANMIŞ telafi kartları
+    # birleştirilir; tamamlanmamış telafi kartları devir katmanında devam eder
+    # (yeni kart açılmaz).
+    try:
+        kapatilan = telafi_kapatilan_denemeler(ogrenci_id)
+    except Exception:  # noqa: BLE001 - DB hatası planı bozmaz
+        kapatilan = {}
+    acik_telafi = set()
+    for _gorev in onceki:
+        if not telafi_gorevi_mi(_gorev):
+            continue
+        _ders = _gorev.get("ders")
+        _ana = _gorev.get("mikro_konu")
+        if not (_ders and _ana):
+            continue
+        _key = (str(_ders), str(_ana))
+        if _gorev.get("durum") in (1, True, "1"):
+            try:
+                _did = int(_gorev.get("deneme_id") or 0)
+            except (TypeError, ValueError):
+                _did = 0
+            if _did > int(kapatilan.get(_key, 0) or 0):
+                kapatilan[_key] = _did
+                # Tamamlanan telafi kartı deneme_id'yi KALICI olarak kapatır.
+                try:
+                    telafi_deneme_kapat(ogrenci_id, _key[0], _key[1], _did)
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            acik_telafi.add(_key)
+    # Yeni deneme yanlışları (biten konularda, kapatılandan daha yeni).
+    deneme_hedefleri = biten_konu_deneme_hedefleri(
+        baglam.get("deneme_yanlislari"), biten, kapatilan
+    )
     uyarilar = []
 
     gunler = [bas + timedelta(days=i) for i in range(gun_sayisi)]
@@ -846,10 +1654,20 @@ def plan_uret(baglam):
     gun_yeni = {gun: 0 for gun in gunler}
     gun_yeni_ders = {gun: set() for gun in gunler}
     gun_mikro = {gun: set() for gun in gunler}
+    # Tekilleştirme: aynı gün aynı ders + ana konu tek kartla planlanır.
+    gun_ana = {gun: set() for gun in gunler}
+    # Günlük rutin sayaçları: (ders, mikro konu) -> o günkü slot sayısı.
+    gun_rutin = {gun: {} for gun in gunler}
     # FAZ 6C: günlük tekrar/defter kotası
     gun_tekrar = {gun: 0 for gun in gunler}
     gun_tekrar_dk = {gun: 0 for gun in gunler}
     gun_konu = {gun: set() for gun in gunler}
+    # Ders dengesi ve günlük soru tavanı sayaçları
+    gun_soru = {gun: 0 for gun in gunler}
+    gun_ders = {gun: {} for gun in gunler}
+    # KURAL 4: tek derse günlük 150 dk / 90 soru tavanı sayaçları.
+    gun_ders_soru = {gun: {} for gun in gunler}
+    gun_ders_dk = {gun: {} for gun in gunler}
     planlanan = set()
     kuyruk = {}
 
@@ -876,6 +1694,9 @@ def plan_uret(baglam):
         hedef = _mikro_hedef(
             ders, makro, ana, mufredat, soru_agirliklari, konu_sureleri
         )
+        # Pekiştirme/ezber dengesi: ezber derslerinde soru yükü azaltılır.
+        oran = ders_soru_orani(ders, pedagoji_map.get((ders, ana)))
+        hedef = int(round(hedef * oran))
         return max(0, hedef - int(gercek.get((ders, ana), 0) or 0))
 
     def _mikro_sure(ders, ana, alt):
@@ -922,6 +1743,12 @@ def plan_uret(baglam):
             hedef_tam = _mikro_hedef(
                 ders, makro, ana, mufredat, soru_agirliklari, konu_sureleri
             )
+            hedef_tam = int(
+                round(
+                    hedef_tam
+                    * ders_soru_orani(ders, pedagoji_map.get((ders, ana)))
+                )
+            )
             paylar = mikro_soru_paylari(hedef_tam, tum_alts)
         else:
             paylar = mikro_soru_paylari(butce, alts)
@@ -943,15 +1770,36 @@ def plan_uret(baglam):
         ana = gorev.get("mikro_konu")
         if not (ders and ana) or gorev.get("durum"):
             continue
+        # Günlük rutin (örn. "Günlük Paragraf") devredilmez: her gün yeniden
+        # üretilir. Aksi hâlde aynı gün ikinci bir rutin kartı doğardı.
+        if rutin_gunluk_limiti(ana, ders) is not None:
+            continue
         makro = gorev.get("makro_konu") or _makro_bul(mufredat, ders, ana)
         mikro = _tek_alt(gorev.get("alt_konu"))
         kalan = gorev_kalan_soru(gorev)
+        if telafi_gorevi_mi(gorev):
+            # KURAL 1: Eksik Kapatma görevi kart kimliğini korur; hedef
+            # (kalan soru) dolunca kendiliğinden programdan düşer.
+            if kalan <= 0:
+                continue
+            _kuyruga_ekle({
+                "oncelik": 1, "tur": "telafi", "ders": ders, "makro": makro,
+                "ana": ana, "mikro": None, "kalan": kalan,
+                "kaynak": gorev.get("id"), "pay_dk": None,
+                "mikro_hedef": int(gorev.get("mikro_hedef_soru") or kalan),
+                "eksik_kapatma": True,
+            })
+            continue
         if (gorev.get("pedagoji_turu") or "") == "Tekrar":
             _kuyruga_ekle({
                 "oncelik": 2, "tur": "tekrar", "ders": ders, "makro": makro,
                 "ana": ana, "mikro": mikro, "kalan": 5,
                 "kaynak": gorev.get("id"), "pay_dk": None,
             })
+            continue
+        # KURAL 1: konu bu arada %100 bittiyse yarım kalan kart devredilmez;
+        # konu ancak yeni bir deneme yanlışıyla telafi kartı olarak döner.
+        if (str(ders), str(ana)) in biten:
             continue
         if kalan <= 0:
             continue
@@ -965,13 +1813,98 @@ def plan_uret(baglam):
             "mikro_hedef": int(mikro_hedef or kalan),
         })
 
-    # 3) Alarm konuları
-    for alarm in baglam.get("alarm_konular") or []:
-        ders = alarm.get("ders")
-        ana = alarm.get("konu") or alarm.get("mikro")
-        if not (ders and ana):
+    # 3a) KURAL 1 (v2.1): biten konuda YENİ deneme yanlışı → TEK telafi kartı.
+    # Deneme yanlışı DOĞRUDAN (alarm serisinden bağımsız) tespit edilir; böylece
+    # biten bir konuda tek denemede yanlış yapılması bile telafi tetikler.
+    for (ders, ana), (deneme_id, yanlis) in sorted(
+        deneme_hedefleri.items(), key=lambda c: c[1][0]
+    ):
+        if (ders, ana) in telafi_gorulen or (ders, ana) in acik_telafi:
             continue
         makro = _makro_bul(mufredat, ders, ana)
+        hedef = telafi_hedefi(
+            ders, ana, pedagoji_map.get((ders, ana), "Pekiştirme"), yanlis=yanlis
+        )
+        _kuyruga_ekle({
+            "oncelik": 3,
+            "tur": "telafi",
+            "ders": ders,
+            "makro": makro,
+            "ana": ana,
+            "mikro": None,
+            "kalan": hedef,
+            "kaynak": None,
+            "pay_dk": None,
+            "mikro_hedef": hedef,
+            "eksik_kapatma": True,
+            "deneme_id": int(deneme_id),
+            "deneme_yanlis": int(yanlis),
+        })
+        telafi_gorulen.add((str(ders), str(ana)))
+
+    # 3) Alarm konuları
+    # Aynı hedef konu için birden fazla uyarı (özellikle birden fazla
+    # "Temel Eksik") TEK görev kartında birleştirilir; eksikler kartın
+    # açıklamasında listelenir: "Polinomlar - Eksikler: Fonksiyonlar, ...".
+    for ders, ana, eksikler, ana_bilinen in _alarm_gruplari(
+        baglam.get("alarm_konular") or [], bilinen
+    ):
+        makro = _makro_bul(mufredat, ders, ana)
+        if (str(ders), str(ana)) in biten:
+            # KURAL 1: %100 biten konu rutin olarak (anlatım/pekiştirme/yeniden
+            # öğrenme) planlanmaz. Yalnızca denemede yanlış çıkarsa, haftada TEK
+            # ve SINIRLI bir "Eksik Kapatma" görevi açılır; hedefi dolan görev
+            # bir daha üretilmez (telafi_kapsanan + devir mekanizması).
+            if eksikler:
+                # Biten konu için ön koşul eksiği yok sayılır (konu kapanmış).
+                continue
+            if (str(ders), str(ana)) in telafi_kapsanan:
+                continue
+            if (str(ders), str(ana)) in telafi_gorulen:
+                continue
+            hedef = telafi_hedefi(
+                ders, ana, pedagoji_map.get((ders, ana), "Pekiştirme")
+            )
+            _kuyruga_ekle({
+                "oncelik": 3,
+                "tur": "telafi",
+                "ders": ders,
+                "makro": makro,
+                "ana": ana,
+                "mikro": None,
+                "kalan": hedef,
+                "kaynak": None,
+                "pay_dk": None,
+                "mikro_hedef": hedef,
+                "eksik_kapatma": True,
+            })
+            telafi_gorulen.add((str(ders), str(ana)))
+            continue
+        if eksikler:
+            # Ön koşul eksiği mikro konulara BÖLÜNMEZ: tek kart üretilir.
+            # Hedef tek görev tavanıyla sınırlanır; böylece aynı eksik kartı
+            # günlere yayılıp çoğalmaz (konu kotası sonra normal plana girer).
+            hedef = int(_kalan_hedef(ders, makro, ana) or 0)
+            tavan_eksik = gorev_soru_tavani(
+                ders, pedagoji_map.get((ders, ana), "Pekiştirme")
+            )
+            if hedef <= 0:
+                hedef = max(10, paragraf_soru)
+            hedef = max(MIN_ANLAMLI_BLOK, min(hedef, tavan_eksik))
+            _kuyruga_ekle({
+                "oncelik": 3,
+                "tur": "alarm" if ana_bilinen else "anlatim",
+                "ders": ders,
+                "makro": makro,
+                "ana": ana,
+                "mikro": None,
+                "kalan": hedef,
+                "kaynak": None,
+                "pay_dk": None,
+                "mikro_hedef": hedef,
+                "eksikler": eksikler,
+            })
+            continue
         dilimler = _mikro_dilimi(ders, makro, ana)
         if not dilimler:
             yedek = alt_listesi(ana, mikro_alt)[:1] or [None]
@@ -979,7 +1912,7 @@ def plan_uret(baglam):
         for alt, pay, sure, mikro_hedef in dilimler:
             _kuyruga_ekle({
                 "oncelik": 3,
-                "tur": "alarm" if ana in bilinen else "anlatim",
+                "tur": "alarm" if ana_bilinen else "anlatim",
                 "ders": ders,
                 "makro": makro,
                 "ana": ana,
@@ -998,10 +1931,20 @@ def plan_uret(baglam):
             if not isinstance(mikrolar, list):
                 continue
             for ana in mikrolar:
-                if ana in bilinen:
+                if ana in bilinen or (str(ders), str(ana)) in biten:
                     continue
                 if not _on_kosul_hazir(ana, bilinen, kurallar):
                     continue
+                # KURAL 2: konuya hiç çalışılmamışsa (sıfır ilerleme) kartın
+                # ilk adımı konu anlatımıdır.
+                ilk_kez = not (
+                    int(gercek.get((ders, ana), 0) or 0)
+                    or any(
+                        int(deger or 0)
+                        for anahtar, deger in mikro_cozulen.items()
+                        if anahtar[0] == ders and anahtar[1] == ana
+                    )
+                )
                 for alt, pay, sure, mikro_hedef in _mikro_dilimi(ders, makro, ana):
                     if (ders, ana, alt) in planlanan:
                         continue
@@ -1009,12 +1952,15 @@ def plan_uret(baglam):
                         "oncelik": 4, "tur": "anlatim", "ders": ders,
                         "makro": makro, "ana": ana, "mikro": alt,
                         "kalan": pay, "kaynak": None, "pay_dk": sure,
-                        "mikro_hedef": mikro_hedef,
+                        "mikro_hedef": mikro_hedef, "ilk_kez": ilk_kez,
                     })
 
     # 5) Pekiştirme (öğrenilmiş ama soru hedefi dolmamış)
     for (ders, ana), cozulen in list(gercek.items()):
         if ders is None or ana is None:
+            continue
+        # KURAL 1: %100 biten konu pekiştirme/tekrar için geri dönmez.
+        if (str(ders), str(ana)) in biten:
             continue
         makro = _makro_bul(mufredat, ders, ana)
         for alt, pay, sure, mikro_hedef in _mikro_dilimi(ders, makro, ana):
@@ -1023,6 +1969,39 @@ def plan_uret(baglam):
                 "ana": ana, "mikro": alt, "kalan": pay, "kaynak": None,
                 "pay_dk": None, "mikro_hedef": mikro_hedef,
             })
+
+    # 5b) KURAL 2 (v2.1): ilk günü (Konu Anlatımı + İlk Kavrama Testi)
+    # TAMAMLANAN %0 konunun 24-48 saat sonrasına "Pekiştirme / Hatırlama
+    # Kontrolü (20 Soru)" görevi planlanır. Bekleyenler dışarıdan (bağlam)
+    # bildirilir; aynı planda anlatım kartıyla çakışmaz.
+    pek_en_erken = (
+        bas + timedelta(days=max(1, PEKISTIRME_MIN_SAAT // 24))
+    ).isoformat()
+    for kayit in baglam.get("pekistirme_bekleyen") or ():
+        if isinstance(kayit, dict):
+            ders = kayit.get("ders")
+            ana = (
+                kayit.get("mikro_konu")
+                or kayit.get("konu")
+                or kayit.get("ana")
+            )
+        else:
+            try:
+                ders, ana = kayit
+            except (TypeError, ValueError):
+                continue
+        if not (ders and ana):
+            continue
+        # KURAL 1: %100 biten konu pekiştirme için geri dönmez.
+        if (str(ders), str(ana)) in biten:
+            continue
+        makro = _makro_bul(mufredat, ders, ana)
+        _kuyruga_ekle({
+            "oncelik": 4, "tur": "pekistirme", "ders": ders, "makro": makro,
+            "ana": ana, "mikro": None, "kalan": PEKISTIRME_SORU,
+            "kaynak": None, "pay_dk": None, "mikro_hedef": PEKISTIRME_SORU,
+            "en_erken": pek_en_erken, "pekistirme": True,
+        })
 
     # 2b) FAZ 6C: yanlış soru defteri + zamanı gelmiş aralıklı tekrarlar
     # (devir ve öncelik 2'deki tekrar görevleriyle aynı katman; gecikmiş
@@ -1087,6 +2066,15 @@ def plan_uret(baglam):
             if 0 < sure <= kap:
                 gun_gorev[tarih].append(paragraf)
                 gun_dk[tarih] += sure
+                gun_soru[tarih] += int(paragraf.get("hedef_soru") or 0)
+                gun_ders[tarih]["TYT Türkçe"] = (
+                    gun_ders[tarih].get("TYT Türkçe", 0) + 1
+                )
+                # Günlük rutin slotu dolu: günde TEK paragraf kartı.
+                rutin_anahtar = ("TYT Türkçe", "Günlük Paragraf")
+                gun_rutin[tarih][rutin_anahtar] = (
+                    gun_rutin[tarih].get(rutin_anahtar, 0) + 1
+                )
 
         for _ in range(60):  # gün içi yerleştirme turu
             kalan_dk = kap - gun_dk[tarih]
@@ -1094,13 +2082,25 @@ def plan_uret(baglam):
                 break
             adaylar = sorted(
                 kuyruk.items(),
-                key=lambda cift: (cift[1]["oncelik"], -cift[1]["kalan"]),
+                key=lambda cift: (
+                    cift[1]["oncelik"],
+                    # Ders dengesi: bugün en az görev alan ders öne geçer.
+                    gun_ders[tarih].get(cift[1]["ders"], 0),
+                    -cift[1]["kalan"],
+                ),
             )
             yerlesti = False
             for oge_anahtar, oge in adaylar:
                 tekrar_mi = oge["tur"] in ("tekrar", "yanlis")
                 # FAZ 6C: tekrar görevi planlanan tarihinden önce yerleşmez.
                 if oge.get("en_erken") and tarih.isoformat() < oge["en_erken"]:
+                    continue
+                # KURAL 4: günlük FARKLI ders sayısı müsaitliğe göre sınırlıdır
+                # (4 saat ve altında en fazla 3, her durumda en fazla 5).
+                if (
+                    oge["ders"] not in gun_ders[tarih]
+                    and len(gun_ders[tarih]) >= gunluk_ders_limiti(kap)
+                ):
                     continue
                 if tekrar_mi:
                     # Günlük tekrar kotası: görev sayısı + dakika payı
@@ -1110,27 +2110,57 @@ def plan_uret(baglam):
                         continue
                     if gun_tekrar_dk[tarih] >= _tekrar_dk_limiti(kap):
                         continue
+                else:
+                    # Ders dengesi ve günlük soru tavanı
+                    if (
+                        gun_ders[tarih].get(oge["ders"], 0)
+                        >= MAKS_DERS_GOREV_GUN
+                    ):
+                        continue
+                    if gun_soru[tarih] >= MAKS_SORU_GUN:
+                        continue
                 if oge_anahtar in gun_mikro[tarih]:
                     continue  # aynı mikro konu aynı gün iki görev olmaz
+                # TEKİLLEŞTİRME: aynı gün + aynı ders + aynı ana konu tek kart.
+                # Günlük rutinler (örn. Günlük Paragraf) kendi slot limitine
+                # tabidir (max_daily_limit, varsayılan 1).
+                rutin_limiti = rutin_gunluk_limiti(oge["ana"], oge["ders"])
+                if rutin_limiti is None:
+                    if (oge["ders"], oge["ana"]) in gun_ana[tarih]:
+                        continue
+                elif (
+                    gun_rutin[tarih].get((oge["ders"], oge["ana"]), 0)
+                    >= rutin_limiti
+                ):
+                    continue
                 if oge["tur"] == "anlatim":
                     if gun_yeni[tarih] >= MAKS_YENI_MIKRO_GUN:
                         continue
-                    if (
-                        oge["ders"] in AGIR_DERSLER
-                        and oge["ders"] in gun_yeni_ders[tarih]
-                    ):
+                    # Aynı dersten günde tek YENİ konu: dersler arasında denge
+                    # kurulur (matematik de tarih de sırayla ilerler).
+                    if oge["ders"] in gun_yeni_ders[tarih]:
                         continue
-                hedef_soru = oge["kalan"]
-                if oge["tur"] == "anlatim":
-                    hedef_soru = min(MAKS_GOREV_SORU, max(10, oge["kalan"] // 2), oge["kalan"])
                 pedagoji = pedagoji_map.get(
                     (oge["ders"], oge["ana"]), "Pekiştirme"
                 )
+                tavan = gorev_soru_tavani(oge["ders"], pedagoji)
+                hedef_soru = min(tavan, oge["kalan"]) if oge["kalan"] else 0
                 kalan_dk_gorev = kalan_dk
                 if tekrar_mi:
                     kalan_dk_gorev = min(
                         kalan_dk, _tekrar_dk_limiti(kap) - gun_tekrar_dk[tarih]
                     )
+                # KURAL 4: tek derse günlük 150 dk / 90 soru tavanı.
+                ders_kalan_soru = MAKS_DERS_GUN_SORU - gun_ders_soru[tarih].get(
+                    oge["ders"], 0
+                )
+                ders_kalan_dk = MAKS_DERS_GUN_DAKIKA - gun_ders_dk[tarih].get(
+                    oge["ders"], 0
+                )
+                if ders_kalan_soru <= 0 or ders_kalan_dk < MIN_ANLAMLI_BLOK:
+                    continue
+                hedef_soru = min(hedef_soru, ders_kalan_soru)
+                kalan_dk_gorev = min(kalan_dk_gorev, ders_kalan_dk)
                 gorev = _soru_sayisi_sigdir(
                     oge["tur"],
                     oge["ders"],
@@ -1148,12 +2178,31 @@ def plan_uret(baglam):
                     sure_dk=oge.get("pay_dk"),
                     mikro_hedef=oge.get("mikro_hedef"),
                     kaynaklar=oge.get("kaynaklar"),
+                    tavan=tavan,
+                    eksikler=oge.get("eksikler"),
+                    ilk_kez=bool(oge.get("ilk_kez")),
+                    deneme_id=oge.get("deneme_id"),
                 )
                 if gorev is None:
                     continue
                 gun_gorev[tarih].append(gorev)
                 gun_dk[tarih] += int(gorev.get("tahmini_sure_dk") or 0)
+                # KURAL 4: tek ders tavanı sayaçları (150 dk / 90 soru).
+                gun_ders_soru[tarih][oge["ders"]] = (
+                    gun_ders_soru[tarih].get(oge["ders"], 0)
+                    + int(gorev.get("hedef_soru") or 0)
+                )
+                gun_ders_dk[tarih][oge["ders"]] = (
+                    gun_ders_dk[tarih].get(oge["ders"], 0)
+                    + int(gorev.get("tahmini_sure_dk") or 0)
+                )
                 gun_mikro[tarih].add(oge_anahtar)
+                if rutin_limiti is None:
+                    gun_ana[tarih].add((oge["ders"], oge["ana"]))
+                else:
+                    gun_rutin[tarih][(oge["ders"], oge["ana"])] = (
+                        gun_rutin[tarih].get((oge["ders"], oge["ana"]), 0) + 1
+                    )
                 planlanan.add(oge_anahtar)
                 if tekrar_mi:
                     gun_tekrar[tarih] += 1
@@ -1162,6 +2211,10 @@ def plan_uret(baglam):
                     kuyruk.pop(oge_anahtar, None)
                     yerlesti = True
                     break
+                gun_soru[tarih] += int(gorev.get("hedef_soru") or 0)
+                gun_ders[tarih][oge["ders"]] = (
+                    gun_ders[tarih].get(oge["ders"], 0) + 1
+                )
                 oge["kalan"] = max(0, oge["kalan"] - int(gorev["hedef_soru"]))
                 if oge["tur"] == "anlatim":
                     gun_yeni[tarih] += 1
@@ -1183,6 +2236,12 @@ def plan_uret(baglam):
         )
 
     tum_gorevler = [g for tarih in gunler for g in gun_gorev[tarih]]
+    # KURAL 4 son süzgeci: günlük ders limiti + tek ders 150 dk / 90 soru tavanı.
+    # Akıllı planlama sırasında zaten uygulandığı için çoğunlukla idempotenttir.
+    try:
+        tum_gorevler = gunluk_ders_doldur(tum_gorevler, musaitlik)
+    except Exception:  # noqa: BLE001 - süzgeç hatası planı bozmaz
+        pass
     gun_ozeti = [
         {
             "tarih": tarih.isoformat(),
@@ -1207,7 +2266,8 @@ def plan_uret(baglam):
 def _soru_sayisi_sigdir(
     tur, ders, makro, mikro, tarih, kalan_soru, kalan_dk,
     kaynak, ogrenci_id, konu_sureleri, alt_konu, pedagoji, alt_sayisi=1,
-    sure_dk=None, mikro_hedef=None, kaynaklar=None,
+    sure_dk=None, mikro_hedef=None, kaynaklar=None, tavan=None, eksikler=None,
+    ilk_kez=False, deneme_id=None,
 ):
     """Kalan süreye sığan en büyük soru sayısıyla görevi üretir (yoksa None).
 
@@ -1218,10 +2278,27 @@ def _soru_sayisi_sigdir(
     FAZ 6C: `kaynaklar` verilirse göreve YALNIZCA gerçekten planlanan soru
     kadar kaynak bağlanır (kalan kaynaklar defterde bekler, sonraki hafta
     yeniden havuza girer -> devir otomatiktir).
+
+    `tavan`: ders bazlı görev soru tavanı (ezber derslerinde daha düşük).
+    Adaylar kabadan inceye sıralanır; günün kalan dakikasına sığan EN BÜYÜK
+    aday seçilir, böylece kapasite boşa harcanmaz.
     """
+    if tavan in (None, "", 0):
+        tavan = gorev_soru_tavani(ders, pedagoji)
+    tavan = max(MIN_ANLAMLI_BLOK, int(tavan))
     adaylar = []
-    for soru in (min(MAKS_GOREV_SORU, kalan_soru), 15, 10, 5):
-        if soru < MIN_ANLAMLI_BLOK or soru > kalan_soru:
+    for soru in (
+        min(tavan, kalan_soru),
+        tavan,
+        35,
+        30,
+        25,
+        20,
+        15,
+        10,
+        MIN_ANLAMLI_BLOK,
+    ):
+        if soru < MIN_ANLAMLI_BLOK or soru > kalan_soru or soru > tavan:
             continue
         if soru not in adaylar:
             adaylar.append(soru)
@@ -1237,9 +2314,15 @@ def _soru_sayisi_sigdir(
             tur, ders, makro, mikro, tarih, soru, kaynak, ogrenci_id,
             konu_sureleri, alt_konu=alt_konu, pedagoji=pedagoji,
             alt_sayisi=alt_sayisi, sure_dk=sure_dk, mikro_hedef=mikro_hedef,
-            kaynaklar=secili,
+            kaynaklar=secili, eksikler=eksikler, ilk_kez=ilk_kez,
+            deneme_id=deneme_id,
         )
         if int(gorev.get("tahmini_sure_dk") or 0) <= kalan_dk:
+            if tur in ("devir", "pes"):
+                etiket = (
+                    "%s ➔ %s" % (mikro, alt_konu) if alt_konu else mikro
+                )
+                _gorev_metnini_tamamla(gorev, etiket)
             return gorev
     return None
 

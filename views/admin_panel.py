@@ -4,16 +4,25 @@
 Panel `st.stop()` ile biter: yönetici öğrenci kokpitine düşmez."""
 
 from datetime import timedelta
+from pathlib import Path
+import shutil
 import sqlite3
 
 import pandas as pd
 import streamlit as st
 
-from config.database import get_connection, log_islem
-from config.settings import get_tr_now
+from config.database import (
+    bootstrap_onbellegini_temizle,
+    get_connection,
+    log_islem,
+)
+from config.settings import get_tr_now, varsayilan_db_yolu
 from services.auth_service import hash_password
 from services import osym_verisi
 from views.shared import set_flash_message
+
+# SQLite dosya imzası: geri yükleme öncesi geçerlilik denetimi.
+_SQLITE_BASLIK = b"SQLite format 3\x00"
 
 
 def yks_referans_verisi_yonetimi(yonetici_id):
@@ -137,6 +146,115 @@ def yks_referans_verisi_yonetimi(yonetici_id):
                 st.rerun()
 
 
+def veritabani_yedek_geri_yukle(yonetici_id):
+    """SQLite veritabanı yedekleme / geri yükleme arayüzü.
+
+    - Yedek indirme: mevcut `.db` dosyası (WAL checkpoint alındıktan sonra)
+      bayt olarak indirilir.
+    - Geri yükleme: `file_uploader` değişince OTOMATİK TETİKLENMEZ; yalnızca
+      açık "Yedeği Geri Yükle ve Yenile" butonuna basılınca çalışır. Böylece
+      sonsuz rerun döngüsü oluşmaz.
+    - Yüklenen dosyanın ilk 16 baytı geçerli SQLite başlığı değilse işlem
+      reddedilir; geçerliyse mevcut veritabanı `.bak` güvenlik kopyasına
+      alınıp yeni dosya üzerine yazılır.
+    """
+    st.subheader("💾 Veritabanı Yedekleme ve Kurtarma (SQLite)")
+    st.caption(
+        "Streamlit Community Cloud konteyneri uykuya geçtiğinde yerel "
+        "`yks_veritabani.db` dosyası sıfırlanabilir. Düzenli yedek indirip "
+        "gerektiğinde buradan geri yükleyebilirsiniz."
+    )
+
+    db_yolu = Path(varsayilan_db_yolu())
+
+    # --- 1) Yedek indir -----------------------------------------------------
+    if not db_yolu.exists():
+        st.warning("Veritabanı dosyası bulunamadı: `%s`" % db_yolu)
+    else:
+        # WAL modundaki son commit'leri ana dosyaya aktar (tutarlı yedek).
+        try:
+            with get_connection() as conn:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        except Exception:  # noqa: BLE001 - checkpoint başarısızsa okuyabildiğimizi alırız
+            pass
+        try:
+            veri = db_yolu.read_bytes()
+        except OSError as hata:
+            st.error("Veritabanı okunamadı: %s" % hata)
+            veri = None
+        if veri:
+            dosya_adi = "karakoc_yks_yedek_%s.db" % get_tr_now().strftime(
+                "%Y%m%d_%H%M"
+            )
+            st.download_button(
+                "⬇️ Yedeği İndir (.db)",
+                data=veri,
+                file_name=dosya_adi,
+                mime="application/octet-stream",
+                key="db_yedek_indir_btn",
+            )
+            st.caption(
+                "Önerilen yedek adı: `%s` · Boyut: %d bayt" % (dosya_adi, len(veri))
+            )
+
+    st.markdown("---")
+
+    # --- 2) Yedekten geri yükle --------------------------------------------
+    st.markdown("**Yedekten Geri Yükle**")
+    yuklenen = st.file_uploader(
+        "Yedek veritabanı dosyasını seç (.db)",
+        type=["db"],
+        accept_multiple_files=False,
+        key="db_yedek_uploader",
+    )
+    if st.button(
+        "♻️ Yedeği Geri Yükle ve Yenile",
+        key="db_yedek_geri_yukle_btn",
+        type="primary",
+    ):
+        if yuklenen is None:
+            st.error("Önce bir `.db` yedek dosyası yüklemelisiniz.")
+            return
+        try:
+            icerik = yuklenen.getvalue()
+        except Exception as hata:  # noqa: BLE001
+            st.error("Dosya okunamadı: %s" % hata)
+            return
+        if not icerik.startswith(_SQLITE_BASLIK):
+            st.error(
+                "❌ Geçersiz dosya: bu bir SQLite veritabanı değil. "
+                "Geri yükleme reddedildi."
+            )
+            return
+        try:
+            # Güvenlik kopyası: mevcut veritabanını bozmadan sakla.
+            if db_yolu.exists():
+                guvenlik = db_yolu.with_name(db_yolu.name + ".bak")
+                shutil.copy2(db_yolu, guvenlik)
+            db_yolu.parent.mkdir(parents=True, exist_ok=True)
+            db_yolu.write_bytes(icerik)
+            # Eski WAL/SHM artıkları geri yüklenen dosyayı bozmasın.
+            for uzanti in ("-wal", "-shm"):
+                artik = db_yolu.with_name(db_yolu.name + uzanti)
+                if artik.exists():
+                    try:
+                        artik.unlink()
+                    except OSError:
+                        pass
+        except OSError as hata:
+            st.error("Geri yükleme başarısız: %s" % hata)
+            return
+        # Şema/migrasyon yeniden çalışsın; arayüz yenilensin.
+        bootstrap_onbellegini_temizle()
+        log_islem(
+            yonetici_id,
+            "DB_RESTORE",
+            "Yedekten geri yükleme: %d bayt" % len(icerik),
+        )
+        set_flash_message("success", "✅ Veritabanı yedekten geri yüklendi.")
+        st.rerun()
+
+
 def render(ctx):
     st.title("👑 KARAKOÇ KOÇLUK YÖNETİCİ PANELİ")
     st.markdown(
@@ -144,12 +262,13 @@ def render(ctx):
         " yönetebilir, düzenleyebilir ve ders taleplerini inceleyebilirsiniz."
     )
 
-    admin_tab1, admin_tab2, admin_tab3, admin_tab4 = st.tabs(
+    admin_tab1, admin_tab2, admin_tab3, admin_tab4, admin_tab5 = st.tabs(
         [
             "➕ 1. Yeni Öğrenci Ekle",
             "👥 2. Öğrenci Düzenleme & Yönetim",
             "🛒 3. Özel Ders Talepleri",
             "🎯 4. YKS Referans Verisi",
+            "💾 5. Veritabanı Yedekleme",
         ],
         key="kt_admin_tabs",
         on_change="rerun",
@@ -190,9 +309,9 @@ def render(ctx):
                 )
                 new_lisans_gun = st.number_input(
                     "Lisans Süresi (Gün):",
-                    min_value=30,
+                    min_value=7,
                     max_value=730,
-                    value=365,
+                    value=30,
                 )
 
             if st.form_submit_button(
@@ -453,6 +572,9 @@ def render(ctx):
 
     with admin_tab4:
         yks_referans_verisi_yonetimi(ctx.user["id"])
+
+    with admin_tab5:
+        veritabani_yedek_geri_yukle(ctx.user["id"])
 
     st.markdown("---")
     if st.button("🚪 Yönetici Oturumunu Kapat"):

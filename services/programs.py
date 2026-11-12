@@ -227,6 +227,10 @@ _GOREV_EK_KOLONLAR = (
     ("program_id", "INTEGER"),
     ("tahmini_sure_dk", "INTEGER"),
     ("kaynak_gorev_id", "INTEGER"),
+    # KURAL 1 (v2.1): telafi kartını tetikleyen deneme_id. Tamamlanınca bu
+    # deneme "telafisi kapatıldı" olarak damgalanır; eski deneme yeniden
+    # tetiklemez.
+    ("deneme_id", "INTEGER"),
     # FAZ 6C: kaynağı (tekrar kaydı / yanlış soru) çözülen veya arşivlenen
     # görev SİLİNMEZ; yalnızca geçersiz olarak işaretlenir (geçmiş korunur).
     ("gecersiz", "INTEGER NOT NULL DEFAULT 0"),
@@ -361,6 +365,12 @@ def _gorev_normallestir(gorev, sira=1):
     kaynak = None if kaynak in (None, "", 0) else _sayi_dogrula(
         kaynak, "Kaynak görev numarası", 1, 10 ** 9
     )
+    # KURAL 1 (v2.1): telafi kartını tetikleyen deneme_id (yalnızca telafi
+    # kartlarında bulunur; yoksa NULL kalır).
+    deneme_id = gorev.get("deneme_id")
+    deneme_id = None if deneme_id in (None, "", 0) else _sayi_dogrula(
+        deneme_id, "Deneme numarası", 0, 10 ** 9
+    )
     adimlar = gorev.get("adimlar") or []
     if not isinstance(adimlar, (list, tuple)):
         raise ProgramHatasi("%d. görevin alt adımları liste olmalıdır." % sira)
@@ -381,6 +391,7 @@ def _gorev_normallestir(gorev, sira=1):
         "pedagoji_turu": _metin(gorev.get("pedagoji_turu")) or "Pekiştirme",
         "tarih": tarih,
         "kaynak_gorev_id": kaynak,
+        "deneme_id": deneme_id,
         "adimlar": list(adimlar),
         "kaynaklar": kaynaklar,
     }
@@ -552,8 +563,8 @@ def _gorev_yaz(conn, ogrenci_id, program_id, gorev, zaman, an):
         "INSERT INTO calisma_programi_gorevler"
         " (ogrenci_id, program_id, gun, ders, makro_konu, mikro_konu,"
         "  gorev_tanimi, hedef_soru, mikro_hedef_soru, pedagoji_turu, durum, tarih,"
-        "  alt_konu, tahmini_sure_dk, kaynak_gorev_id)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+        "  alt_konu, tahmini_sure_dk, kaynak_gorev_id, deneme_id)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
         (
             ogrenci_id,
             program_id,
@@ -569,6 +580,7 @@ def _gorev_yaz(conn, ogrenci_id, program_id, gorev, zaman, an):
             gorev["alt_konu"],
             gorev["tahmini_sure_dk"],
             gorev["kaynak_gorev_id"],
+            gorev.get("deneme_id"),
         ),
     )
     yeni_id = imlec.lastrowid

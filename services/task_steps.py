@@ -35,11 +35,206 @@ MAKS_SORU = 2000
 MIN_SORU_BLOGU = 5
 MAKS_SORU_BLOGU = 10
 NOT_SURESI_DK = 6
-VARSAYILAN_KONU_SURESI_DK = 60
+# Ezber derslerinde not/özet adımı daha uzundur: soru yükü azalırken
+# tekrar edilebilir yazılı özet üretilir (pekiştirme derslerinde 6 dk).
+EZBER_NOT_SURESI_DK = 12
+# Ezber derslerinde konu anlatımı/kavram okuma da daha uzundur (KURAL 3).
+EZBER_ANLATIM_CARPANI = 1.3
+# Bir mikro konunun anlatımı için makul varsayılan. 60 dk'lık varsayılan
+# günde en fazla 2-3 konuya izin veriyordu; gerçekçi günlük hacim (100-400
+# soru) için anlatım 30 dk'ya çekildi.
+VARSAYILAN_KONU_SURESI_DK = 30
 MIN_KONU_ANLATIM_DK = 10
 VARSAYILAN_SORU_SURESI_DK = 1.5
 MIN_GERCEK_OLCUM = 3
 VARSAYILAN_DB_YOLU = "yks_veritabani.db"
+
+# Pekiştirme (soru ağırlıklı) / ezber (not ağırlıklı) ders ayrımı.
+# `main.py`deki aynı adlı listelerle birebir uyumludur; planlama motoru
+# Streamlit'e bağımlı olmadığı için burada da tanımlanır.
+PEKISTIRME_DERSLERI = (
+    "Matematik ve Veri",
+    "TYT Matematik",
+    "AYT Matematik",
+    "TYT Geometri",
+    "AYT Geometri",
+    "TYT Fizik",
+    "AYT Fizik",
+    "Gramer ve Kelime",
+    "Soru Tipleri",
+)
+EZBER_DERSLERI = (
+    "TYT Biyoloji",
+    "AYT Biyoloji",
+    "TYT Türkçe",
+    "TYT Tarih",
+    "AYT Tarih-1",
+    "AYT Tarih-2",
+    "TYT Coğrafya",
+    "AYT Coğrafya-1",
+    "AYT Coğrafya-2",
+    "TYT Felsefe & Din",
+    "AYT Felsefe Grubu",
+    "AYT Din Kültürü",
+    "AYT Edebiyat",
+    "TYT Kimya",
+    "AYT Kimya",
+    "YDT İngilizce",
+)
+
+# --- v2.1 Ders kategorisi (KURAL 2) ---------------------------------------
+# Kavram / Sözel Ağırlıklı: blok süresinin %55-65'i okuma, kavram tekrarı ve
+# özet çıkarmaya ayrılır; soru daha az ama kavrama odaklıdır.
+KAVRAM_SOZEL_DERSLERI = (
+    "TYT Biyoloji",
+    "AYT Biyoloji",
+    "TYT Tarih",
+    "AYT Tarih",
+    "AYT Tarih-1",
+    "AYT Tarih-2",
+    "TYT Coğrafya",
+    "AYT Coğrafya",
+    "AYT Coğrafya-1",
+    "AYT Coğrafya-2",
+    "AYT Edebiyat",
+    "TYT Felsefe",
+    "TYT Felsefe & Din",
+    "TYT Din Kültürü",
+    "AYT Din Kültürü",
+    "AYT Felsefe Grubu",
+)
+# İşlem / Pratik Ağırlıklı: konu biliniyorsa anlatım minimize edilir; blok
+# süresinin %80-90'ı kolay ➔ orta ➔ zor soru pratiğine ayrılır.
+ISLEM_PRATIK_DERSLERI = (
+    "TYT Matematik",
+    "AYT Matematik",
+    "TYT Geometri",
+    "AYT Geometri",
+    "TYT Fizik",
+    "AYT Fizik",
+    "TYT Kimya",
+    "AYT Kimya",
+)
+
+# Hedef süre payları (KURAL 2): (okuma_orani, pratik_orani).
+KAVRAM_OKUMA_ORANI = 0.60
+KAVRAM_PRATIK_ORANI = 0.40
+ISLEM_OKUMA_ORANI = 0.15
+ISLEM_PRATIK_ORANI = 0.85
+
+
+def ders_kategorisi(ders=None):
+    """Dersin pedagojik kategorisi: 'kavram' | 'islem' | 'diger'.
+
+    Liste eşleşmesi hem tam müfredat adlarını (ör. 'AYT Tarih-1') hem de
+    kısa adları (ör. 'AYT Tarih') kapsar.
+    """
+    ad = str(ders or "").strip()
+    if not ad:
+        return "diger"
+    if ad in KAVRAM_SOZEL_DERSLERI or ad in ("TYT Türkçe", "YDT İngilizce"):
+        return "kavram"
+    if ad in ISLEM_PRATIK_DERSLERI:
+        return "islem"
+    # Önek eşleşmesi (ör. "AYT Tarih-2" gibi türevler).
+    for kategori_ders in KAVRAM_SOZEL_DERSLERI:
+        if ad.startswith(kategori_ders):
+            return "kavram"
+    for kategori_ders in ISLEM_PRATIK_DERSLERI:
+        if ad.startswith(kategori_ders):
+            return "islem"
+    return "diger"
+
+
+def kavram_sozel_mi(ders=None):
+    return ders_kategorisi(ders) == "kavram"
+
+
+def islem_pratik_mi(ders=None):
+    return ders_kategorisi(ders) == "islem"
+
+
+def ders_sure_dengesi(ders=None):
+    """Dersin HEDEF okuma/pratik süre payları (KURAL 2).
+
+    - kavram: okuma %60 / pratik %40 (spec %55-65 bantı içinde)
+    - islem : okuma %15 / pratik %85 (spec %80-90 bantı içinde)
+    - diger : dengeli varsayılan (ezber ise %50/50, değilse %30/70)
+    """
+    kategori = ders_kategorisi(ders)
+    if kategori == "kavram":
+        return {
+            "kategori": "kavram",
+            "okuma_orani": KAVRAM_OKUMA_ORANI,
+            "pratik_orani": KAVRAM_PRATIK_ORANI,
+        }
+    if kategori == "islem":
+        return {
+            "kategori": "islem",
+            "okuma_orani": ISLEM_OKUMA_ORANI,
+            "pratik_orani": ISLEM_PRATIK_ORANI,
+        }
+    if ders_ezber_mi(ders):
+        return {"kategori": "diger", "okuma_orani": 0.50, "pratik_orani": 0.50}
+    return {"kategori": "diger", "okuma_orani": 0.30, "pratik_orani": 0.70}
+
+
+def ders_ezber_mi(ders=None, pedagoji_turu=None):
+    """Ders ezber ağırlıklı mı?
+
+    Pedagoji türü "Ezber" ise ders listesinden bağımsız olarak ezber sayılır;
+    aksi hâlde dersin kendi sınıflandırması geçerlidir (pekiştirme dersleri
+    hiçbir zaman ezber sayılmaz).
+    """
+    if str(pedagoji_turu or "").strip().lower() == "ezber":
+        return True
+    return str(ders or "").strip() in EZBER_DERSLERI
+
+
+def not_suresi_dk(ders=None, pedagoji_turu=None):
+    """Not/özet adımının süresi (dk): ezber derslerinde daha uzun."""
+    return EZBER_NOT_SURESI_DK if ders_ezber_mi(ders, pedagoji_turu) else NOT_SURESI_DK
+
+
+# KURAL 2: öğrenme görevinin İLK adımı konu anlatımıdır.
+ADIM_KONU_ANLATIMI = "Konu Anlatımı (Video/Kaynak)"
+# KURAL 3: pekiştirme derslerinde sorular kolay ➔ orta ➔ zor sırasıyla ilerler.
+ZORLUK_SIRASI = ("kolay", "orta", "zor")
+
+
+def zorluk_etiketleri(bloklar, ders=None, pedagoji_turu=None):
+    """Soru bloklarının zorluk etiketleri (pekiştirme derslerinde ilerlemeli).
+
+    Ezber derslerinde sorular kavrama odaklıdır; zorluk etiketi eklenmez.
+    Tek blok varsa blok "kolay ➔ orta ➔ zor" olarak etiketlenir.
+    """
+    adet = len(bloklar or [])
+    if adet <= 0 or ders_ezber_mi(ders, pedagoji_turu):
+        return [""] * max(0, adet)
+    if adet == 1:
+        return [" (%s ➔ %s ➔ %s)" % ZORLUK_SIRASI]
+    etiketler = []
+    for sira in range(adet):
+        oran = sira / float(adet)
+        if oran < 1.0 / 3.0:
+            etiketler.append(" (%s)" % ZORLUK_SIRASI[0])
+        elif oran < 2.0 / 3.0:
+            etiketler.append(" (%s)" % ZORLUK_SIRASI[1])
+        else:
+            etiketler.append(" (%s)" % ZORLUK_SIRASI[2])
+    return etiketler
+
+
+def telafi_gorevi_mi(gorev):
+    """Görev bir "Eksik Kapatma" (biten konu telafisi) kartı mı? (KURAL 1)
+
+    `eksik_kapatma` alanı veritabanına yazılmadığı için kart metni de kontrol
+    edilir (bkz. `planner.telafi_gorevi_mi`).
+    """
+    gorev = gorev or {}
+    if gorev.get("eksik_kapatma") or gorev.get("deneme_tekrari"):
+        return True
+    return "Eksik Kapatma" in str(gorev.get("gorev_tanimi") or "")
 
 # Ders bazlı soru çözme süresi (dakika/soru). Eski sürümde tüm dersler için
 # tek katsayı (1.5) kullanılıyordu; burada ders zorluğuna göre ayrıştırıldı.
@@ -286,6 +481,17 @@ def adimlari_uret(gorev):
         hedef = 0
 
     adimlar = []
+    if telafi_gorevi_mi(gorev):
+        # KURAL 1: "Eksik Kapatma" (biten konu telafisi): önce denemede kaçan
+        # sorular incelenir, sonra hedef soru blokları çözülür.
+        adimlar.append(_adim("Denemede yanlış yaptığın soruları incele.", ADIM_NOT))
+        bloklar = soru_blogu_uret(hedef, ders, makro, mikro, pedagoji)
+        for blok, etiket in zip(bloklar, zorluk_etiketleri(bloklar, ders, pedagoji)):
+            adimlar.append(_adim("%d soru çöz%s." % (blok, etiket), ADIM_SORU, blok))
+        if len(adimlar) == 1:
+            adimlar.append(_adim("Görevi tamamla.", ADIM_GENEL))
+        return adimlar[:MAKS_ADIM_SAYISI]
+
     if pedagoji == "Tekrar":
         adimlar.append(_adim("Özet notlarını oku ve gözden geçir.", ADIM_TEKRAR))
         hatirlatma = 5 if hedef <= 0 else min(hedef, 10)
@@ -299,16 +505,21 @@ def adimlari_uret(gorev):
         if makro == "Deneme Tekrarı":
             adimlar.append(_adim("Denemede yanlış yaptığın soruları incele.", ADIM_NOT))
         elif bolunmez_mi(ders, makro, mikro, pedagoji):
-            adimlar.append(_adim("Konu anlatımını izle / tekrar et.", ADIM_IZLE))
+            # KURAL 2: bilinmeyen konuda İLK adım konu anlatımıdır.
+            adimlar.append(_adim("%s: izle / tekrar et." % ADIM_KONU_ANLATIMI, ADIM_IZLE))
             adimlar.append(_adim("Kısa not çıkar.", ADIM_NOT))
         else:
-            adimlar.append(_adim("Konu anlatım videosunu izle.", ADIM_IZLE))
+            adimlar.append(
+                _adim("%s: videoyu izle / kaynağı oku." % ADIM_KONU_ANLATIMI, ADIM_IZLE)
+            )
             adimlar.append(_adim("3-4 satırlık kısa not çıkar.", ADIM_NOT))
     elif makro == "Deneme Tekrarı":
         adimlar.append(_adim("Denemede yanlış yaptığın soruları incele.", ADIM_NOT))
 
-    for blok in soru_blogu_uret(hedef, ders, makro, mikro, pedagoji):
-        adimlar.append(_adim("%d soru çöz." % blok, ADIM_SORU, blok))
+    # KURAL 3: pekiştirme derslerinde pratik kolay ➔ orta ➔ zor ilerler.
+    bloklar = soru_blogu_uret(hedef, ders, makro, mikro, pedagoji)
+    for blok, etiket in zip(bloklar, zorluk_etiketleri(bloklar, ders, pedagoji)):
+        adimlar.append(_adim("%d soru çöz%s." % (blok, etiket), ADIM_SORU, blok))
 
     if not adimlar:
         adimlar.append(_adim("Görevi tamamla.", ADIM_GENEL))
@@ -800,6 +1011,98 @@ def mikro_tamamlananlar(ogrenci_id):
     }
 
 
+# --- KURAL 2 (v2.1): %0 konu pekiştirme kilidi -----------------------------
+# %0 konunun ilk günü (Konu Anlatımı + İlk Kavrama Testi) tamamlandıktan sonra
+# 24-48 saat sonrasına planlanan "Pekiştirme / Hatırlama Kontrolü (20 Soru)"
+# adımı bekleyen konular %100 (biten) sayılmaz; ilerlemesi %50'de kilitlenir.
+PEKISTIRME_ISARETI = "Pekiştirme / Hatırlama Kontrolü"
+
+
+def pekistirme_gorevi_mi(gorev):
+    """Görev bir "Pekiştirme / Hatırlama Kontrolü" kartı mı?"""
+    if not isinstance(gorev, dict):
+        return False
+    if gorev.get("pekistirme"):
+        return True
+    return PEKISTIRME_ISARETI in str(gorev.get("gorev_tanimi") or "")
+
+
+def konu_ilerleme_ust_siniri(pekistirme_bekliyor):
+    """Pekiştirme bekleyen konunun ilerleme üst sınırı (%50 kilit)."""
+    return 50 if pekistirme_bekliyor else 100
+
+
+def _pekistirme_konulari(ogrenci_id, sadece_bekleyen):
+    """Pekiştirme görevi olan konular {(ders, mikro_konu)} (iç yardımcı)."""
+    try:
+        with _baglanti() as conn:
+            if sadece_bekleyen:
+                satirlar = conn.execute(
+                    "SELECT DISTINCT ders, mikro_konu FROM calisma_programi_gorevler"
+                    " WHERE ogrenci_id = ? AND durum = 0 AND gorev_tanimi LIKE ?",
+                    (ogrenci_id, "%%%s%%" % PEKISTIRME_ISARETI),
+                ).fetchall()
+            else:
+                satirlar = conn.execute(
+                    "SELECT DISTINCT ders, mikro_konu FROM calisma_programi_gorevler"
+                    " WHERE ogrenci_id = ? AND gorev_tanimi LIKE ?",
+                    (ogrenci_id, "%%%s%%" % PEKISTIRME_ISARETI),
+                ).fetchall()
+    except (sqlite3.Error, TypeError, ValueError):
+        return set()
+    sonuc = set()
+    for satir in satirlar:
+        try:
+            ders, mikro = satir["ders"], satir["mikro_konu"]
+        except (IndexError, KeyError, TypeError):
+            try:
+                ders, mikro = satir[0], satir[1]
+            except (IndexError, TypeError):
+                continue
+        if ders and mikro:
+            sonuc.add((str(ders), str(mikro)))
+    return sonuc
+
+
+def pekistirme_bekleyenler(ogrenci_id):
+    """Bekleyen (durum=0) pekiştirme görevi olan konular: {(ders, mikro_konu)}.
+
+    Bu konular pekiştirme adımı tamamlanana kadar %100 (biten) sayılmaz.
+    Tablo yoksa (eski/test veritabanı) boş küme döner.
+    """
+    return _pekistirme_konulari(ogrenci_id, sadece_bekleyen=True)
+
+
+def pekistirme_olanlar(ogrenci_id):
+    """Herhangi bir (bekleyen/tamam) pekiştirme görevi olan konular."""
+    return _pekistirme_konulari(ogrenci_id, sadece_bekleyen=False)
+
+
+def pekistirme_ihtiyaci(ogrenci_id):
+    """Öğrenmesi tamamlanmış ama %100 bitmemiş, pekiştirmesi planlanmamış konular.
+
+    Dönen: {(ders, mikro_konu)}. Bu konular için ilk günün (Konu Anlatımı +
+    İlk Kavrama Testi) ardından 24-48 saat sonrasına "Pekiştirme / Hatırlama
+    Kontrolü (20 Soru)" planlanır (KURAL 2).
+    """
+    try:
+        satirlar = mikro_ilerleme_listesi(ogrenci_id, sadece_tamam=False)
+    except Exception:  # noqa: BLE001 - tablo yoksa ihtiyaç yok
+        return set()
+    planlanmis = pekistirme_olanlar(ogrenci_id)
+    sonuc = set()
+    for kayit in satirlar:
+        if not int(kayit.get("ogrenme_tamam") or 0):
+            continue
+        if int(kayit.get("tamamlandi") or 0):
+            continue  # %100 biten konu; pekiştirmeye gerek yok
+        key = (str(kayit.get("ders")), str(kayit.get("mikro_konu")))
+        if key in planlanmis:
+            continue
+        sonuc.add(key)
+    return sonuc
+
+
 # ==============================================================================
 # SÜRE TAHMİNİ (planlanan süre; gerçek süre FAZ 4 oturumlarından gelir)
 # ==============================================================================
@@ -1053,6 +1356,8 @@ def sure_plani(
     - Konu anlatımı: `konu_suresi_dk` (mikro konuya özel) → gerçek medyan →
       makul varsayılan. Ana konu süresi alt başlıklara bölünmez.
     - Not: sabit kısa süre (adım varsa).
+    - Ezber derslerinde anlatım/okuma süresi `EZBER_ANLATIM_CARPANI` ile uzar
+      (KURAL 3); pekiştirme derslerinde anlatım makul kalır, soru pratiği artar.
     - Soru çözümü: blok büyüklüğü × ders katsayısı (öğrenci hızı varsa o).
     - Yeterli gerçek ölçüm varsa (>=3 oturum) süre medyana göre ölçeklenir.
     """
@@ -1088,7 +1393,15 @@ def sure_plani(
             ogrenme = mikro_anlatim_suresi(
                 ogrenci_id, ders, mikro_konu, alt_konu, konu_sureleri
             )
-    not_dk = NOT_SURESI_DK if ADIM_NOT in turler else 0
+        # KURAL 3: ezber derslerinde konu anlatımı/kavram okuma daha uzundur;
+        # pekiştirme derslerinde anlatım makul tutulur (ağırlık soru pratiğinde).
+        if ogrenme and ders_ezber_mi(ders, pedagoji_turu):
+            ogrenme = max(
+                MIN_KONU_ANLATIM_DK, _yuvarla5(ogrenme * EZBER_ANLATIM_CARPANI)
+            )
+    not_dk = (
+        not_suresi_dk(ders, pedagoji_turu) if ADIM_NOT in turler else 0
+    )
 
     hiz = ogrenci_soru_hizi(ogrenci_id, ders)
     if hiz:
@@ -1110,10 +1423,23 @@ def sure_plani(
         kaynak = "gercek"
 
     toplam = max(5, ogrenme + not_dk + soru_dk)
+    # KURAL 2 (v2.1): okuma/pratik süre payları ve ders kategorisi. Değerler
+    # mevcut süre matematiğini DEĞİŞTİRMEZ; yalnızca ders katsayı dengesinin
+    # görünür/denetlenebilir olmasını sağlar (kavram %55-65 okuma, işlem
+    # %80-90 pratik hedefi).
+    okuma_dk = ogrenme + not_dk
+    hedef_denge = ders_sure_dengesi(ders)
     return {
         "ogrenme_dk": ogrenme,
         "not_dk": not_dk,
         "soru_dk": soru_dk,
+        "okuma_dk": okuma_dk,
+        "pratik_dk": soru_dk,
+        "okuma_orani": round(okuma_dk / float(toplam), 3) if toplam else 0.0,
+        "pratik_orani": round(soru_dk / float(toplam), 3) if toplam else 0.0,
+        "kategori": hedef_denge["kategori"],
+        "hedef_okuma_orani": hedef_denge["okuma_orani"],
+        "hedef_pratik_orani": hedef_denge["pratik_orani"],
         "toplam_dk": toplam,
         "soru_katsayisi": round(float(katsayi), 2),
         "kaynak": kaynak,

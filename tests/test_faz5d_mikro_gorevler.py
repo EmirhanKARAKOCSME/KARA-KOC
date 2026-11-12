@@ -383,17 +383,20 @@ class MikroGorevTestleri(unittest.TestCase):
         ana_hedef = self._ana_hedef()
         paylar = planner.mikro_soru_paylari(ana_hedef, alts)
 
-        # 1. mikro konuda 4 soru çözülmüş: yalnızca o mikro konu azalır.
+        # 1. mikro konunun TAM kotası çözülmüş: yalnızca o mikro konu düşer.
+        tam = paylar[alts[0]]
         gorevler = {
             g["alt_konu"]: g
             for g in self._polinom(
-                mikro_cozulen={("AYT Matematik", V.POLINOM_ANA_KONU, alts[0]): 4}
+                mikro_cozulen={("AYT Matematik", V.POLINOM_ANA_KONU, alts[0]): tam}
             )
         }
         self.assertNotIn(alts[0], gorevler, "Hedefi dolan mikro konu planlanmaz")
         for alt in alts[1:]:
             self.assertEqual(gorevler[alt]["hedef_soru"], paylar[alt])
-        self.assertEqual(sum(g["hedef_soru"] for g in gorevler.values()), ana_hedef - 4)
+        self.assertEqual(
+            sum(g["hedef_soru"] for g in gorevler.values()), ana_hedef - tam
+        )
 
         # Kısmi ilerleme: kalan soru kadar planlanır.
         gorevler = {

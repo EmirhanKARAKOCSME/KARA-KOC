@@ -18,6 +18,7 @@ from data.weights_and_times import KONU_SURELERI_DK, SORU_AGIRLIKLARI
 from services import planner
 from services import programs as program_service
 from services import task_steps
+from services import topic_progress
 from services.topic_progress import alt_durumlari_yukle
 
 
@@ -55,13 +56,12 @@ def init_program_motoru_db(db_path=None):
 
 
 def konu_soru_hedefi_hesapla(makro, mikro_sayisi, aktif_yanlis=0):
-    """Konunun kredi puanından türeyen toplam soru kotası (5'in katı, 40-300 arası)."""
-    makro_kredi = SORU_AGIRLIKLARI.get(makro, 10.0)
-    mikro_kredi = makro_kredi / max(1, mikro_sayisi)
-    zorluk = 1.0 + min(0.3, 0.05 * aktif_yanlis)
-    hedef = int(round(mikro_kredi * 10.0 * zorluk))
-    hedef = max(40, min(300, hedef))
-    return int(round(hedef / 5.0) * 5)
+    """Konunun kredi puanından türeyen toplam soru kotası (5'in katı, 40-300 arası).
+
+    Formülün TEK kaynağı `topic_progress.konu_soru_kotasi`'dır; biten konu
+    tespiti de aynı hedefi kullanır.
+    """
+    return topic_progress.konu_soru_kotasi(makro, mikro_sayisi, aktif_yanlis)
 
 
 def kolaydan_zora_dagilim(soru, oran):
@@ -339,7 +339,8 @@ def akilli_program_motoru_gorevleri(
                 soru = max(1, min(max(10, slot_soru // 2), hedef))
                 video = max(1, int(round(KONU_SURELERI_DK.get(mi, 60) / 30.0)))
                 tanim = (
-                    f"📌 {mi} ➔ konu anlatımını izle ve kısa özet çıkar, "
+                    "📌 Konu Anlatımı (Video/Kaynak) ➔ "
+                    f"{mi}: izle / oku ve kısa özet çıkar, "
                     f"ardından {soru} soru çöz ({kolaydan_zora_dagilim(soru, 0.0)})."
                 )
                 rows.append((gun_adi, d, m, mi, tanim, soru, ped, tarih_str))
@@ -528,8 +529,8 @@ def akilli_program_motoru_v2_gorevleri(
                     )
                     ogrenme_dk = paket_dk
                     bas = (
-                        f"📌 {mi} ➔ mikro konu: {liste_str}. "
-                        "Konu anlatımını izle ve 3-4 satır not çıkar; "
+                        f"📌 Konu Anlatımı (Video/Kaynak) ➔ {mi} ➔ mikro konu: "
+                        f"{liste_str}. İzle / oku ve 3-4 satır not çıkar; "
                     )
                     son_not = (
                         f" ✅ Bu görev bitince '{mi}' tamamlanmış olur."
@@ -540,7 +541,10 @@ def akilli_program_motoru_v2_gorevleri(
                     video = max(1, int(round(KONU_SURELERI_DK.get(mi, 60) / 30.0)))
                     ogrenme_dk = KONU_SURELERI_DK.get(mi, 60)
                     mikro_bitti = True
-                    bas = f"📌 {mi} ➔ konu anlatımını izle ve kısa özet çıkar, "
+                    bas = (
+                        "📌 Konu Anlatımı (Video/Kaynak) ➔ "
+                        f"{mi}: izle / oku ve kısa özet çıkar, "
+                    )
                     son_not = ""
                 tanim = (
                     bas
@@ -692,7 +696,7 @@ def eski_program_motoru_gorevleri(
     return gorevler
 
 
-def _gorevleri_zenginlestir(gorevler, ogrenci_id):
+def _gorevleri_zenginlestir(gorevler, ogrenci_id, biten_konular=None):
     """FAZ 5B/5D: görevleri MİKRO KONU bazında böler; checklist + süre ekler.
 
     FAZ 5D: Fallback motorları (alt başlık / soru kotalı / temel) ana konu
@@ -700,6 +704,11 @@ def _gorevleri_zenginlestir(gorevler, ogrenci_id):
     ayrılır. Böylece hangi motor çalışırsa çalışsın hiyerarşi aynıdır:
     ders → ana konu → mikro konu → checklist. Bölme idempotenttir; zaten tek
     mikro konu içeren görev olduğu gibi kalır.
+
+    `biten_konular`: (ders, mikro konu) çiftleri. %100 biten konuların RUTİN
+    kartları (KURAL 1) ve günlük farklı ders sayısı sınırı (KURAL 4) yedek
+    motorlarda da uygulanır; deneme yanlışından doğan "Eksik Kapatma" kartları
+    korunur.
     """
     try:
         tamamlanan_altlar = alt_durumlari_yukle(ogrenci_id)
@@ -725,7 +734,38 @@ def _gorevleri_zenginlestir(gorevler, ogrenci_id):
                 alt_sayisi=alt_sayisi,
             )
         )
-    return sonuc
+    # KURAL 1: biten konuların rutin kartları programa dönmez (telafi kartları
+    # korunur). Biten kümesi verilmezse deneme/pekiştirme kartları olduğu gibi
+    # kalır (geriye dönük uyum).
+    if biten_konular:
+        sonuc = planner.biten_konu_suzgeci(sonuc, biten_konular)
+        # Aynı konu için daha önce açılmış telafi kartı varsa (tamamlanmış ya
+        # da devirde) yeniden üretilmez.
+        kapsanan = planner.telafi_kapsanan_konular(
+            _planlama_onceki_gorevler(ogrenci_id)
+        )
+        if kapsanan:
+            sonuc = [
+                gorev
+                for gorev in sonuc
+                if not (
+                    planner.telafi_gorevi_mi(gorev)
+                    and (str(gorev.get("ders")), str(gorev.get("mikro_konu")))
+                    in kapsanan
+                )
+            ]
+    # KURAL 4: aynı güne müsaitliğe göre sınırlı sayıda farklı ders atanır.
+    try:
+        musaitlik = planner.musaitlik_yukle(ogrenci_id)
+    except Exception:  # noqa: BLE001 - müsaitlik okunamazsa varsayılan
+        musaitlik = {}
+    # KURAL 4: günlük farklı ders limiti + tek ders 150 dk / 90 soru tavanı.
+    sonuc = planner.gunluk_ders_doldur(sonuc, musaitlik)
+    # Tekilleştirme: aynı gün + aynı ders + aynı mikro konu/görev tek kez.
+    # Rutin görevler (Günlük Paragraf) gün başına max_daily_limit slot alır.
+    # Ana konu bazlı kısıt burada KAPALI: fallback motoru ana konuyu mikro
+    # konulara bölerek aynı güne birden çok meşru kart yazabilir (FAZ 5D).
+    return planner.gunluk_tekillestir(sonuc, ana_konu_tekillestir=False)
 
 
 def _gercek_cozulen_haritasi(ogrenci_id):
@@ -791,15 +831,73 @@ def _planlama_onceki_gorevler(ogrenci_id):
 
 
 def _alarm_konulari(alarmlar_db):
-    """Alarm konularını öncelik sırasıyla düz listeye çevirir."""
+    """Alarm konularını öncelik sırasıyla düz listeye çevirir.
+
+    "Temel Eksik" uyarılarında `hedef_konu` ve `eksikler` de taşınır; böylece
+    planlayıcı eksik ön koşulları TEK görev kartında birleştirir.
+    """
     sonuc = []
     for kat in ("siyah", "kirmizi", "mor", "turuncu"):
         for alarm in (alarmlar_db or {}).get(kat, []) or []:
             ders = alarm.get("ders")
             konu = alarm.get("konu")
             if ders and konu:
-                sonuc.append({"ders": ders, "konu": konu, "seviye": kat})
+                sonuc.append({
+                    "ders": ders,
+                    "konu": konu,
+                    "seviye": kat,
+                    "hedef_konu": alarm.get("hedef_konu"),
+                    "eksikler": list(alarm.get("eksikler") or []),
+                })
     return sonuc
+
+
+def _deneme_yanlislari_haritasi(ogrenci_id):
+    """KURAL 1 (v2.1): biten konu telafisi için deneme yanlışları (okuma).
+
+    Her kayıt: `{'ders', 'konu', 'deneme_id', 'yanlis_adedi'}`. `deneme_id`'si
+    olmayan eski kayıtlar alınmaz; telafi yalnızca GERÇEK bir denemeye bağlanır.
+    """
+    sonuc = []
+    try:
+        with get_connection(db_path) as conn:
+            satirlar = conn.execute(
+                "SELECT COALESCE(ders, '') AS ders,"
+                " COALESCE(konu_adi, '') AS konu, deneme_id,"
+                " COALESCE(yanlis_adedi, 0) AS yanlis"
+                " FROM deneme_konu_yanlislari"
+                " WHERE ogrenci_id = ? AND deneme_id IS NOT NULL"
+                " AND (durum IS NULL OR durum = 'Aktif')",
+                (ogrenci_id,),
+            ).fetchall()
+    except Exception:  # noqa: BLE001 - tablo yoksa boş harita (eski DB)
+        return sonuc
+    for satir in satirlar:
+        ders, konu = satir[0], satir[1]
+        if not (ders and konu):
+            continue
+        try:
+            deneme_id = int(satir[2] or 0)
+            yanlis = int(satir[3] or 0)
+        except (TypeError, ValueError):
+            continue
+        if deneme_id <= 0:
+            continue
+        sonuc.append({
+            "ders": ders,
+            "konu": konu,
+            "deneme_id": deneme_id,
+            "yanlis_adedi": yanlis,
+        })
+    return sonuc
+
+
+def _pekistirme_bekleyen(ogrenci_id):
+    """KURAL 2 (v2.1): pekiştirme adımı planlanması gereken konular (okuma)."""
+    try:
+        return task_steps.pekistirme_ihtiyaci(ogrenci_id)
+    except Exception:  # noqa: BLE001 - tablo yoksa pekiştirme planlanmaz
+        return set()
 
 
 def planlama_baglami_olustur(ogrenci_id, aktif_mufredat, alarmlar_db,
@@ -819,6 +917,13 @@ def planlama_baglami_olustur(ogrenci_id, aktif_mufredat, alarmlar_db,
         tamamlanan_altlar = alt_durumlari_yukle(ogrenci_id)
     except Exception:  # noqa: BLE001
         tamamlanan_altlar = set()
+    try:
+        # KURAL 1: %100 biten konular planlayıcıya açıkça bildirilir.
+        biten_konular = topic_progress.biten_konulari_yukle(
+            ogrenci_id, aktif_mufredat
+        )
+    except Exception:  # noqa: BLE001 - tespit yapılamazsa planlama sürer
+        biten_konular = set()
     return {
         "ogrenci_id": ogrenci_id,
         "baslangic": get_tr_now().date(),
@@ -837,6 +942,12 @@ def planlama_baglami_olustur(ogrenci_id, aktif_mufredat, alarmlar_db,
         "pedagoji": pedagoji,
         "tamamlanan_altlar": tamamlanan_altlar,
         "alarm_konular": _alarm_konulari(alarmlar_db),
+        "biten_konular": biten_konular,
+        # KURAL 1 (v2.1): biten konularda YENİ deneme yanlışı tespiti için.
+        "deneme_yanlislari": _deneme_yanlislari_haritasi(ogrenci_id),
+        # KURAL 2 (v2.1): ilk günü tamamlanmış %0 konular için 24-48 saat
+        # sonrasına pekiştirme planlanır.
+        "pekistirme_bekleyen": _pekistirme_bekleyen(ogrenci_id),
     }
 
 
@@ -859,6 +970,8 @@ def haftalik_program_gorevleri_uret(
     hata olursa hiçbir şey değişmez (eski program aktif kalır).
     """
     uyarilar = []
+    # KURAL 1: biten (%100) konular yedek motorlarda da rutin plana dönmez.
+    biten_konular = set((plan_baglami or {}).get("biten_konular") or ())
 
     # FAZ 5C: kredi puanı + gerçek ilerleme + günlük kapasiteye dayalı motor
     if plan_baglami:
@@ -886,7 +999,11 @@ def haftalik_program_gorevleri_uret(
             paragraf_hedef,
         )
         if gorevler:
-            return _gorevleri_zenginlestir(gorevler, ogrenci_id), "Alt başlık motoru", uyarilar
+            return (
+                _gorevleri_zenginlestir(gorevler, ogrenci_id, biten_konular),
+                "Alt başlık motoru",
+                uyarilar,
+            )
         uyarilar.append("Alt başlık motoru boş plan üretti.")
     except Exception as hata:  # noqa: BLE001 - motor çökse de program korunur
         log_islem(ogrenci_id, "PLANNER_FALLBACK", "Alt başlık motoru: %s" % hata)
@@ -907,7 +1024,7 @@ def haftalik_program_gorevleri_uret(
         )
         if gorevler:
             return (
-                _gorevleri_zenginlestir(gorevler, ogrenci_id),
+                _gorevleri_zenginlestir(gorevler, ogrenci_id, biten_konular),
                 "Soru kotalı motor",
                 uyarilar,
             )
@@ -929,4 +1046,8 @@ def haftalik_program_gorevleri_uret(
         filtered_ezber,
     )
     uyarilar.append("Temel program motoru kullanıldı.")
-    return _gorevleri_zenginlestir(gorevler, ogrenci_id), "Temel motor", uyarilar
+    return (
+        _gorevleri_zenginlestir(gorevler, ogrenci_id, biten_konular),
+        "Temel motor",
+        uyarilar,
+    )

@@ -16,7 +16,7 @@
     ]
   },
   "ana_konu": "Polinomlar ve Çarpanlara Ayırma",
-  "soru_hedefi": 17,
+  "soru_hedefi": 135,
   "gorevler": [
     {
       "tarih": "2026-11-09",
@@ -24,15 +24,15 @@
       "makro_konu": "İleri Cebir ve Fonksiyonlar",
       "mikro_konu": "Polinomlar ve Çarpanlara Ayırma",
       "alt_konu": "Polinom tanımı, derece, katsayılar toplamı",
-      "hedef_soru": 4,
-      "mikro_hedef_soru": 4,
-      "tahmini_sure_dk": 74,
+      "hedef_soru": 27,
+      "mikro_hedef_soru": 27,
+      "tahmini_sure_dk": 87,
       "pedagoji_turu": "Pekiştirme",
       "gorev_turu": "anlatim",
-      "gorev_tanimi": "📌 Polinomlar ve Çarpanlara Ayırma ➔ Polinom tanımı, derece, katsayılar toplamı: konu anlatımını izle ve kısa özet çıkar, ardından 4 soru çöz.",
+      "gorev_tanimi": "📌 Konu Anlatımı (Video/Kaynak) ➔ Polinomlar ve Çarpanlara Ayırma ➔ Polinom tanımı, derece, katsayılar toplamı: izle / oku ve kısa özet çıkar, ardından 27 soru çöz.",
       "adimlar": [
         {
-          "baslik": "Konu anlatım videosunu izle.",
+          "baslik": "Konu Anlatımı (Video/Kaynak): videoyu izle / kaynağı oku.",
           "adim_turu": "izle",
           "hedef_soru": 0
         },
@@ -42,9 +42,19 @@
           "hedef_soru": 0
         },
         {
-          "baslik": "4 soru çöz.",
+          "baslik": "9 soru çöz (kolay).",
           "adim_turu": "soru",
-          "hedef_soru": 4
+          "hedef_soru": 9
+        },
+        {
+          "baslik": "9 soru çöz (orta).",
+          "adim_turu": "soru",
+          "hedef_soru": 9
+        },
+        {
+          "baslik": "9 soru çöz (zor).",
+          "adim_turu": "soru",
+          "hedef_soru": 9
         }
       ]
     },
@@ -54,15 +64,15 @@
       "makro_konu": "İleri Cebir ve Fonksiyonlar",
       "mikro_konu": "Polinomlar ve Çarpanlara Ayırma",
       "alt_konu": "Polinomlarda dört işlem",
-      "hedef_soru": 4,
-      "mikro_hedef_soru": 4,
-      "tahmini_sure_dk": 74,
+      "hedef_soru": 27,
+      "mikro_hedef_soru": 27,
+      "tahmini_sure_dk": 87,
       "pedagoji_turu": "Pekiştirme",
       "gorev_turu": "anlatim",
-      "gorev_tanimi": "📌 Polinomlar ve Çarpanlara Ayırma ➔ Polinomlarda dört işlem: konu anlatımını izle ve kısa özet çıkar, ardından 4 soru çöz.",
+      "gorev_tanimi": "📌 Konu Anlatımı (Video/Kaynak) ➔ Polinomlar ve Çarpanlara Ayırma ➔ Polinomlarda dört işlem: izle / oku ve kısa özet çıkar, ardından 27 soru çöz.",
       "adimlar": [
         {
-          "baslik": "Konu anlatım videosunu izle.",
+          "baslik": "Konu Anlatımı (Video/Kaynak): videoyu izle / kaynağı oku.",
           "adim_turu": "izle",
           "hedef_soru": 0
         },
@@ -72,9 +82,19 @@
           "hedef_soru": 0
         },
         {
-          "baslik": "4 soru çöz.",
+          "baslik": "9 soru çöz (kolay).",
           "adim_turu": "soru",
-          "hedef_soru": 4
+          "hedef_soru": 9
+        },
+        {
+          "baslik": "9 soru çöz (orta).",
+          "adim_turu": "soru",
+          "hedef_soru": 9
+        },
+        {
+          "baslik": "9 soru çöz (zor).",
+          "adim_turu": "soru",
+          "hedef_soru": 9
         }
       ]
     },
@@ -84,15 +104,15 @@
       "makro_konu": "İleri Cebir ve Fonksiyonlar",
       "mikro_konu": "Polinomlar ve Çarpanlara Ayırma",
       "alt_konu": "Bölme algoritması ve kalan teoremi",
-      "hedef_soru": 3,
-      "mikro_hedef_soru": 3,
-      "tahmini_sure_dk": 72,
+      "hedef_soru": 27,
+      "mikro_hedef_soru": 27,
+      "tahmini_sure_dk": 87,
       "pedagoji_turu": "Pekiştirme",
       "gorev_turu": "anlatim",
-      "gorev_tanimi": "📌 Polinomlar ve Çarpanlara Ayırma ➔ Bölme algoritması ve kalan teoremi: konu anlatımını izle ve kısa özet çıkar, ardından 3 soru çöz.",
+      "gorev_tanimi": "📌 Konu Anlatımı (Video/Kaynak) ➔ Polinomlar ve Çarpanlara Ayırma ➔ Bölme algoritması ve kalan teoremi: izle / oku ve kısa özet çıkar, ardından 27 soru çöz.",
       "adimlar": [
         {
-          "baslik": "Konu anlatım videosunu izle.",
+          "baslik": "Konu Anlatımı (Video/Kaynak): videoyu izle / kaynağı oku.",
           "adim_turu": "izle",
           "hedef_soru": 0
         },
@@ -102,9 +122,19 @@
           "hedef_soru": 0
         },
         {
-          "baslik": "3 soru çöz.",
+          "baslik": "9 soru çöz (kolay).",
           "adim_turu": "soru",
-          "hedef_soru": 3
+          "hedef_soru": 9
+        },
+        {
+          "baslik": "9 soru çöz (orta).",
+          "adim_turu": "soru",
+          "hedef_soru": 9
+        },
+        {
+          "baslik": "9 soru çöz (zor).",
+          "adim_turu": "soru",
+          "hedef_soru": 9
         }
       ]
     },
@@ -114,15 +144,15 @@
       "makro_konu": "İleri Cebir ve Fonksiyonlar",
       "mikro_konu": "Polinomlar ve Çarpanlara Ayırma",
       "alt_konu": "Kök-katsayı ilişkileri",
-      "hedef_soru": 3,
-      "mikro_hedef_soru": 3,
-      "tahmini_sure_dk": 72,
+      "hedef_soru": 27,
+      "mikro_hedef_soru": 27,
+      "tahmini_sure_dk": 87,
       "pedagoji_turu": "Pekiştirme",
       "gorev_turu": "anlatim",
-      "gorev_tanimi": "📌 Polinomlar ve Çarpanlara Ayırma ➔ Kök-katsayı ilişkileri: konu anlatımını izle ve kısa özet çıkar, ardından 3 soru çöz.",
+      "gorev_tanimi": "📌 Konu Anlatımı (Video/Kaynak) ➔ Polinomlar ve Çarpanlara Ayırma ➔ Kök-katsayı ilişkileri: izle / oku ve kısa özet çıkar, ardından 27 soru çöz.",
       "adimlar": [
         {
-          "baslik": "Konu anlatım videosunu izle.",
+          "baslik": "Konu Anlatımı (Video/Kaynak): videoyu izle / kaynağı oku.",
           "adim_turu": "izle",
           "hedef_soru": 0
         },
@@ -132,9 +162,19 @@
           "hedef_soru": 0
         },
         {
-          "baslik": "3 soru çöz.",
+          "baslik": "9 soru çöz (kolay).",
           "adim_turu": "soru",
-          "hedef_soru": 3
+          "hedef_soru": 9
+        },
+        {
+          "baslik": "9 soru çöz (orta).",
+          "adim_turu": "soru",
+          "hedef_soru": 9
+        },
+        {
+          "baslik": "9 soru çöz (zor).",
+          "adim_turu": "soru",
+          "hedef_soru": 9
         }
       ]
     },
@@ -144,15 +184,15 @@
       "makro_konu": "İleri Cebir ve Fonksiyonlar",
       "mikro_konu": "Polinomlar ve Çarpanlara Ayırma",
       "alt_konu": "Çarpanlara ayırma yöntemleri",
-      "hedef_soru": 3,
-      "mikro_hedef_soru": 3,
-      "tahmini_sure_dk": 72,
+      "hedef_soru": 27,
+      "mikro_hedef_soru": 27,
+      "tahmini_sure_dk": 87,
       "pedagoji_turu": "Pekiştirme",
       "gorev_turu": "anlatim",
-      "gorev_tanimi": "📌 Polinomlar ve Çarpanlara Ayırma ➔ Çarpanlara ayırma yöntemleri: konu anlatımını izle ve kısa özet çıkar, ardından 3 soru çöz.",
+      "gorev_tanimi": "📌 Konu Anlatımı (Video/Kaynak) ➔ Polinomlar ve Çarpanlara Ayırma ➔ Çarpanlara ayırma yöntemleri: izle / oku ve kısa özet çıkar, ardından 27 soru çöz.",
       "adimlar": [
         {
-          "baslik": "Konu anlatım videosunu izle.",
+          "baslik": "Konu Anlatımı (Video/Kaynak): videoyu izle / kaynağı oku.",
           "adim_turu": "izle",
           "hedef_soru": 0
         },
@@ -162,9 +202,19 @@
           "hedef_soru": 0
         },
         {
-          "baslik": "3 soru çöz.",
+          "baslik": "9 soru çöz (kolay).",
           "adim_turu": "soru",
-          "hedef_soru": 3
+          "hedef_soru": 9
+        },
+        {
+          "baslik": "9 soru çöz (orta).",
+          "adim_turu": "soru",
+          "hedef_soru": 9
+        },
+        {
+          "baslik": "9 soru çöz (zor).",
+          "adim_turu": "soru",
+          "hedef_soru": 9
         }
       ]
     }

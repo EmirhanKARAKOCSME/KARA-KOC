@@ -129,10 +129,14 @@ def render(ctx):
                         )
                     )
                     for item in val_list:
-                        kredi = SORU_AGIRLIKLARI.get(item["konu"], 10.0)
+                        # "Temel Eksik" uyarılarında konu metni birleşik
+                        # etikettir ("Konu - Eksikler: A, B"); puanlama ve
+                        # pedagoji için HEDEF KONU kullanılır.
+                        temel_konu = item.get("hedef_konu") or item["konu"]
+                        kredi = SORU_AGIRLIKLARI.get(temel_konu, 10.0)
                         p_score = (kredi * 0.8) + (alarm_skor * 0.2)
                         p_tip = get_konu_pedagoji_turu(
-                            item["ders"], item["konu"]
+                            item["ders"], temel_konu
                         )
                         obj = {
                             "p_score": p_score,

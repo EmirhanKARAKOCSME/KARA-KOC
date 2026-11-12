@@ -200,27 +200,36 @@ def hesapla_tum_alarmlar(ogrenci_id, mevcut_sinif, aktif_mufredat):
             )
 
             if baglam_tetiklendi:
-                for ok in on_kosul_listesi:
+                # Eksik ön koşullar TEK uyarıda toplanır; her ön koşul için
+                # ayrı alarm/görev kartı üretilmez.
+                eksikler = [
+                    ok
+                    for ok in on_kosul_listesi
                     if (
                         ok not in bilinen_mikro_set
                         and ok not in bilinen_makro_set
-                    ):
-                        alarmlar["turuncu"].append({
-                            "ders": (
-                                hedef_ders
-                                if hedef_ders
-                                else "İleri Seviye Odak Konusu"
-                            ),
-                            "konu": f"{hedef_konu} (Temel Eksik: {ok})",
-                            "detay": (
-                                f"'{hedef_konu}' konusunu iyi anlamak için önce"
-                                f" **'{ok}'** konusunu tamamlamalısınız."
-                            ),
-                            "aksiyon": (
-                                f"Önce '{ok}' konusunun temelini çalışın."
-                            ),
-                            "neden": "Ön Koşul Eksikliği",
-                        })
+                    )
+                ]
+                if eksikler:
+                    eksik_metni = ", ".join(eksikler)
+                    alarmlar["turuncu"].append({
+                        "ders": (
+                            hedef_ders
+                            if hedef_ders
+                            else "İleri Seviye Odak Konusu"
+                        ),
+                        "konu": f"{hedef_konu} - Eksikler: {eksik_metni}",
+                        "hedef_konu": hedef_konu,
+                        "eksikler": eksikler,
+                        "detay": (
+                            f"'{hedef_konu}' konusunu iyi anlamak için önce"
+                            f" **{eksik_metni}** konusunu tamamlamalısınız."
+                        ),
+                        "aksiyon": (
+                            f"Önce '{eksik_metni}' konusunun temelini çalışın."
+                        ),
+                        "neden": "Ön Koşul Eksikliği",
+                    })
 
     (
         tyt_o,

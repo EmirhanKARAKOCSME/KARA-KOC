@@ -178,3 +178,54 @@
         padding-right: 0.7rem;
     }
 }
+
+/* v2.1: Mobil görünüm (<=768px) - görev kartları yatay taşmaz, st.columns
+   blokları dar ekranda okunaklı kalır, butonlar dokunmatikte rahat basılır. */
+@media (max-width: 768px) {
+    html,
+    body,
+    .stApp {
+        overflow-x: hidden !important;
+        max-width: 100vw;
+    }
+    .block-container {
+        overflow-x: hidden;
+        padding-left: 0.7rem;
+        padding-right: 0.7rem;
+    }
+    /* Görev / alarm / simülasyon kartları dar ekranda taşmaz. */
+    .focus-task-card,
+    .sim-card,
+    .single-card-container,
+    .alarm-card-info,
+    .alarm-card-warning,
+    .alarm-card-danger,
+    .alarm-card-black,
+    .alarm-card-purple {
+        box-sizing: border-box;
+        max-width: 100%;
+        overflow-x: hidden;
+        overflow-wrap: break-word;
+        word-break: break-word;
+    }
+    /* Kolonlar dar ekranda alt alta kaydırılabilir, okunaklı kalır. */
+    div[data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
+        gap: 6px !important;
+    }
+    div[data-testid="stColumn"] {
+        min-width: 0 !important;
+    }
+    /* Dokunmatik ekranda rahat basılabilir buton / indirme boyutu. */
+    .stButton > button,
+    .stDownloadButton > button {
+        min-height: 44px;
+        width: 100%;
+    }
+    .stTabs [data-baseweb="tab"] {
+        font-size: 0.82rem;
+        height: auto;
+        min-height: 44px;
+        padding: 8px 10px;
+    }
+}
