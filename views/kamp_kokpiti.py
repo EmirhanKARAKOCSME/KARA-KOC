@@ -22,16 +22,61 @@ PROTOKOL_METNI = (
 _KAMP_DILIM_HEDEF = kamp_motoru.KAMP_MAKS_DILIM_SORU * 2  # mikro başına ~30 soru
 
 
+def _tema_gradyan(tema):
+    """Tema için (merkez, orta, kenar) renk üçlüsü (v2.4)."""
+    gradyan = getattr(kamp_motoru, "TEMA_GRADYANLARI", {}).get(tema)
+    if gradyan:
+        return gradyan
+    renk = kamp_motoru.TEMA_PALETLERI.get(tema, "#0A182E")
+    return (renk, "#050B18", "#020306")
+
+
 def _css(tema):
-    renk = kamp_motoru.TEMA_PALETLERI.get(tema, "#0B192C")
-    st.markdown(
-        """
+    """Kamp uzay kokpiti CSS'ini döndürür (güvenli; % biçimlendirme YOK).
+
+    v2.4: CSS metni `.replace()` yer tutucularıyla doldurulur; böylece CSS
+    içindeki `100%`, `50%` gibi yüzde değerleri Python `%` operatörüyle
+    çakışmaz (eski `ValueError` çökmesi giderildi). Ayrıca saf CSS ile
+    parıldayan mikro yıldız katmanı ve yavaş kozmik gradyan kayması eklenir.
+    """
+    merkez, orta, kenar = _tema_gradyan(tema)
+    sablon = """
         <style>
         [data-testid="stSidebar"] {display:none !important;}
         .stApp {
             background: radial-gradient(circle at 50% 38%,
-                        %s 0%%, #040406 78%%) !important;
+                __MERKEZ_RENK__ 0%, __ORTA_RENK__ 46%, __KENAR_RENK__ 100%) !important;
+            background-size: 200% 200% !important;
+            animation: kamp_kozmik_kayma 19s ease-in-out infinite !important;
             color: #E2E8F0;
+        }
+        /* v2.4: zarif, göz yormayan parıldayan mikro yıldız katmanı (saf CSS). */
+        .stApp::before {
+            content: "";
+            position: fixed;
+            top: 0; right: 0; bottom: 0; left: 0;
+            pointer-events: none;
+            z-index: 0;
+            background-image:
+                radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,0.75), transparent 55%),
+                radial-gradient(1px 1px at 72% 64%, rgba(255,255,255,0.55), transparent 55%),
+                radial-gradient(1px 1px at 38% 82%, rgba(203,213,225,0.60), transparent 55%),
+                radial-gradient(1.5px 1.5px at 88% 18%, rgba(255,255,255,0.50), transparent 55%),
+                radial-gradient(1px 1px at 12% 68%, rgba(203,213,225,0.45), transparent 55%),
+                radial-gradient(1px 1px at 56% 12%, rgba(255,255,255,0.60), transparent 55%);
+            background-repeat: repeat;
+            background-size: 260px 260px, 340px 340px, 300px 300px,
+                             420px 420px, 380px 380px, 460px 460px;
+            animation: kamp_yildiz_twinkle 5.5s ease-in-out infinite;
+        }
+        @keyframes kamp_kozmik_kayma {
+            0% { background-position: 0% 46%; }
+            50% { background-position: 100% 54%; }
+            100% { background-position: 0% 46%; }
+        }
+        @keyframes kamp_yildiz_twinkle {
+            0%, 100% { opacity: 0.32; }
+            50% { opacity: 0.85; }
         }
         .kamp-baslik {display:flex; align-items:center; gap:16px; margin:4px 0 16px 0;}
         .kamp-baslik .marka {font-size:2.0rem; letter-spacing:0.38em;
@@ -47,8 +92,11 @@ def _css(tema):
         .kamp-mikro {font-size:0.95rem; color:#CBD5E1;}
         .kamp-dilim {color:#94A3B8; font-size:0.8rem; letter-spacing:0.06em;}
         </style>
-        """ % renk,
-        unsafe_allow_html=True,
+        """
+    return (
+        sablon.replace("__MERKEZ_RENK__", merkez)
+        .replace("__ORTA_RENK__", orta)
+        .replace("__KENAR_RENK__", kenar)
     )
 
 
@@ -58,7 +106,7 @@ def _sayac(kayit_id):
         return
     gecen = int(max(0, time.time() - float(kayit["baslangic_ts"])))
     st.markdown(
-        '<div class="kamp-sayac">%02d:%02d</div>' % (gecen // 60, gecen % 60),
+        f'<div class="kamp-sayac">{gecen // 60:02d}:{gecen % 60:02d}</div>',
         unsafe_allow_html=True,
     )
 
@@ -106,7 +154,7 @@ def _protokol_karti():
         return True
     st.markdown("### KAMP PROTOKOLÜ")
     st.markdown(
-        '<div class="kamp-kart kamp-mikro">%s</div>' % PROTOKOL_METNI,
+        f'<div class="kamp-kart kamp-mikro">{PROTOKOL_METNI}</div>',
         unsafe_allow_html=True,
     )
     if st.button("Anladım, Kampı Başlat", type="primary", key="kamp_protokol_btn"):
@@ -142,7 +190,7 @@ def render(ctx):
     oturum_id = st.session_state.get("kamp_oturum_id")
 
     tema = st.session_state.get("kamp_tema") or kamp_motoru.VARSAYILAN_TEMA
-    _css(tema)
+    st.markdown(_css(tema), unsafe_allow_html=True)
 
     # --- Başlık + tema + çıkış -----------------------------------------
     ust1, ust2 = st.columns([5, 1])
@@ -217,8 +265,7 @@ def render(ctx):
     except Exception:  # noqa: BLE001
         ilerleme = 0
     st.markdown(
-        '<div class="kamp-dilim">ÜNİTE İLERLEMESİ: %%%d — %s</div>'
-        % (int(ilerleme), kilit["makro_unite"]),
+        f'<div class="kamp-dilim">ÜNİTE İLERLEMESİ: %{int(ilerleme)} — {kilit["makro_unite"]}</div>',
         unsafe_allow_html=True,
     )
     st.progress(min(1.0, max(0.0, ilerleme / 100.0)))
@@ -234,10 +281,10 @@ def render(ctx):
     analiz = st.session_state.get("kamp_analiz")
     if analiz:
         st.markdown("### 🔎 Yanlış / Boş Analizi ve Çözüm Kontrolü (5 dk)")
+        _basari = float(analiz.get("basari_orani") or 0)
         st.markdown(
-            '<div class="kamp-kart">Başarı: <b>%%%.1f</b> (eşik %%75). Önce yanlış '
-            "ve boş sorularını incele, çözümünü kontrol et; sonra devam et.</div>"
-            % float(analiz.get("basari_orani") or 0),
+            f'<div class="kamp-kart">Başarı: <b>%{_basari:.1f}</b> (eşik %75). Önce '
+            f'yanlış ve boş sorularını incele, çözümünü kontrol et; sonra devam et.</div>',
             unsafe_allow_html=True,
         )
         if st.button("Analizi Tamamla ve Devam Et", type="primary",
@@ -262,9 +309,9 @@ def render(ctx):
 
     kayit_id = st.session_state.get("kamp_kayit_id")
     st.markdown(
-        '<div class="kamp-kart"><div class="kamp-dilim">BÖLÜM %d/%d</div>'
-        '<div class="kamp-mikro"><b>%s</b> ➔ %s</div></div>'
-        % (dilim["dilim_no"], dilim["toplam_dilim"], kilit["makro_unite"], aktif_mikro),
+        f'<div class="kamp-kart"><div class="kamp-dilim">BÖLÜM '
+        f'{dilim["dilim_no"]}/{dilim["toplam_dilim"]}</div>'
+        f'<div class="kamp-mikro"><b>{kilit["makro_unite"]}</b> ➔ {aktif_mikro}</div></div>',
         unsafe_allow_html=True,
     )
     if kayit_id:
@@ -289,7 +336,7 @@ def render(ctx):
         try:
             sonuc = kamp_motoru.mikro_gorev_tamamla(kayit_id, yanlis, bos)
         except Exception as hata:  # noqa: BLE001
-            set_flash_message("error", "Kamp kaydı tamamlanamadı: %s" % hata)
+            set_flash_message("error", f"Kamp kaydı tamamlanamadı: {hata}")
             st.rerun()
         st.session_state["kamp_kayit_id"] = None
         st.session_state["kamp_kayit_anahtar"] = None
@@ -307,10 +354,11 @@ def render(ctx):
         oneri = kamp_motoru.yorgunluk_onerisi(secilen_ders)
         st.markdown("**Öneri:** " + oneri["mesaj"])
         for kademe in kamp_motoru.yorgunluk_kademeleri():
-            st.markdown("- **%d. %s** — %s" % (
-                kademe["kademe"], kademe["baslik"], kademe["mesaj"]))
+            st.markdown(
+                f'- **{kademe["kademe"]}. {kademe["baslik"]}** — {kademe["mesaj"]}'
+            )
         if oneri.get("tur") == "sozel" and oneri.get("oneri") in dersler:
-            if st.button("Sözel derse geç (%s)" % oneri["oneri"], key="kamp_sozel_gec"):
+            if st.button(f'Sözel derse geç ({oneri["oneri"]})', key="kamp_sozel_gec"):
                 st.session_state["kamp_ders"] = oneri["oneri"]
                 st.session_state["kamp_mikro_idx"] = 0
                 st.session_state["kamp_dilim_idx"] = 0
@@ -328,15 +376,13 @@ def render(ctx):
     ozet = st.session_state.get("kamp_ozet")
     if ozet:
         st.markdown("### Kamp Özeti Fişi")
+        _ts = int(ozet.get("toplam_soru") or 0)
+        _td = int(ozet.get("toplam_dogru") or 0)
+        _ty = int(ozet.get("toplam_yanlis") or 0)
+        _tb = int(ozet.get("toplam_bos") or 0)
         st.markdown(
-            '<div class="kamp-kart">Toplam soru: <b>%d</b> • Doğru: <b>%d</b> • '
-            "Yanlış: <b>%d</b> • Boş: <b>%d</b></div>"
-            % (
-                int(ozet.get("toplam_soru") or 0),
-                int(ozet.get("toplam_dogru") or 0),
-                int(ozet.get("toplam_yanlis") or 0),
-                int(ozet.get("toplam_bos") or 0),
-            ),
+            f'<div class="kamp-kart">Toplam soru: <b>{_ts}</b> • Doğru: <b>{_td}</b> • '
+            f'Yanlış: <b>{_ty}</b> • Boş: <b>{_tb}</b></div>',
             unsafe_allow_html=True,
         )
 

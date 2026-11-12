@@ -43,11 +43,20 @@ DURUM_TEKRAR = "tekrar_gerek"
 
 # Soğuk uzay temaları (arayüz de bu listeyi kullanır).
 TEMA_PALETLERI = {
-    "Kozmik Lacivert": "#0B192C",
+    "Kozmik Lacivert": "#0A182E",
     "Galaktik Mor": "#160D29",
     "Kuzey Zümrüdü": "#081F1A",
     "Kızıl Tutulma": "#21090E",
     "Siber Siyah-Pembe": "#1F0B19",
+}
+# v2.4: her temanın 3 duraklı uzay gradyanı (merkez ➔ orta ➔ kenar).
+# Varsayılan "Kozmik Lacivert" derin kozmik lacivert / uzay siyahına iner.
+TEMA_GRADYANLARI = {
+    "Kozmik Lacivert": ("#0A182E", "#050B18", "#020306"),
+    "Galaktik Mor": ("#160D29", "#0B0616", "#020208"),
+    "Kuzey Zümrüdü": ("#081F1A", "#040F0D", "#010402"),
+    "Kızıl Tutulma": ("#21090E", "#100407", "#020103"),
+    "Siber Siyah-Pembe": ("#1F0B19", "#0F050C", "#020104"),
 }
 VARSAYILAN_TEMA = "Kozmik Lacivert"
 

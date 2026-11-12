@@ -37,6 +37,7 @@
 
 Bu modül Streamlit'e bağımlı değildir.
 """
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -116,6 +117,18 @@ DERS_LIMIT_MAKS_GUN = 5
 # Süre doldurma (KURAL 4): tek bir derse tek günde en fazla 150 dk / 90 soru.
 MAKS_DERS_GUN_DAKIKA = 150
 MAKS_DERS_GUN_SORU = 90
+
+# --- v2.4: günlük müsaitlik -> programa birebir ölçekleme -------------------
+# Konu SEÇİMİNİ değiştirmeyen; yalnızca SEÇİLMİŞ görevlerin blok süresi ve
+# soru hedefini günlük müsaitliğe (gunluk_hedef_dk) göre büyütüp küçülten
+# izole kapasite katmanı. Pedagojik tavan: tek konu en fazla 120 dk / 60 soru.
+KAPASITE_TEK_KONU_MAKS_DK = 120
+KAPASITE_TEK_KONU_MAKS_SORU = 60
+KAPASITE_OLCEK_ALT_ESIK = 0.88     # altında ise büyütme devreye girer
+KAPASITE_OLCEK_HEDEF_ORANI = 0.95   # büyütmede hedefin ~%95'ine oturtulur
+KAPASITE_OLCEK_ALT_BANT = 0.90
+KAPASITE_OLCEK_UST_BANT = 1.05
+KAPASITE_MIN_BOS_DK = 45           # bu kadar boşluk + tavan -> tek karma tarama
 
 # Günlük mikro rutinler ana ders kotasında sayılır: Paragraf→Türkçe,
 # Problem→Matematik, Geometri 10'lu→Geometri. Anahtar: küçük harf alt metin.
@@ -1575,6 +1588,195 @@ def _tekrar_gruplari(havuz, mufredat):
     ]
 
 
+# ==============================================================================
+# v2.4 - İZOLE GÜNLÜK KAPASİTE ÖLÇEKLEYİCİ (konu seçimini DEĞİŞTİRMEZ)
+# ==============================================================================
+def _kapasite_sayi(deger):
+    try:
+        return int(deger or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _gun_toplam_dk(gorevler):
+    """Bir günün (veya listenin) toplam planlanan dakikası."""
+    return sum(max(0, _kapasite_sayi(g.get("tahmini_sure_dk")))
+               for g in (gorevler or []) if isinstance(g, dict))
+
+
+def _karma_tarama_mi(gorev):
+    return isinstance(gorev, dict) and gorev.get("gorev_tipi") == "karma_tarama"
+
+
+def _soru_metni_yenile(metin, yeni_soru):
+    """'... N soru ...' metnindeki ilk soru sayısını yeni değere çevirir."""
+    if not metin or yeni_soru is None:
+        return metin
+    return re.sub(r"\d+\s*soru", "%d soru" % int(yeni_soru),
+                  str(metin), count=1, flags=re.IGNORECASE)
+
+
+def _gorev_olcekle(gorev, carpan):
+    """Tek görevin süre/soru yükünü orantılı ölçekler (tavan/taban korunur).
+
+    Tavan: KAPASITE_TEK_KONU_MAKS_DK dk / KAPASITE_TEK_KONU_MAKS_SORU soru.
+    Küçültmede taban: MIN_KONU_BLOK_DK dk / MIN_KONU_BLOK_SORU soru.
+    `tahmini_sure_dk`, `konu_anlatim_dk`, `soru_cozum_dk`, `sure_plani`,
+    `hedef_soru`, `mikro_hedef_soru`, checklist adımları ve görev metni
+    tutarlı biçimde güncellenir.
+    """
+    eski_dk = _kapasite_sayi(gorev.get("tahmini_sure_dk"))
+    eski_soru = _kapasite_sayi(gorev.get("hedef_soru"))
+    # v2.2 korunur: %0 konu anlatımı (ilk kavrama) kartının soru yükü 20'yi
+    # AŞMAZ. Bu kart büyütülse bile soru hedefi ve checklist adımları sabit
+    # kalır; yalnızca anlatım/soru SÜRESİ büyür (pedagojik güvence).
+    _konu_anlatimi = gorev.get("gorev_tipi") == "konu_anlatimi"
+    _soru_tavan = 20 if _konu_anlatimi else KAPASITE_TEK_KONU_MAKS_SORU
+    yeni_dk = min(int(round(eski_dk * carpan)), KAPASITE_TEK_KONU_MAKS_DK)
+    yeni_soru = min(int(round(eski_soru * carpan)), _soru_tavan)
+    if eski_dk > 0 and carpan < 1:
+        yeni_dk = max(MIN_KONU_BLOK_DK, yeni_dk)
+    if eski_soru > 0 and carpan < 1:
+        yeni_soru = max(MIN_KONU_BLOK_SORU, yeni_soru)
+    gorev["tahmini_sure_dk"] = max(0, yeni_dk)
+    gorev["hedef_soru"] = max(0, yeni_soru)
+    if _kapasite_sayi(gorev.get("mikro_hedef_soru")) > 0:
+        gorev["mikro_hedef_soru"] = max(0, yeni_soru)
+    kdk = _kapasite_sayi(gorev.get("konu_anlatim_dk"))
+    sdk = _kapasite_sayi(gorev.get("soru_cozum_dk"))
+    if (kdk + sdk) > 0:
+        yeni_kdk = int(round(yeni_dk * (kdk / float(kdk + sdk))))
+        gorev["konu_anlatim_dk"] = max(0, min(yeni_dk, yeni_kdk))
+        gorev["soru_cozum_dk"] = max(0, yeni_dk - gorev["konu_anlatim_dk"])
+    plan = gorev.get("sure_plani")
+    if isinstance(plan, dict):
+        sabit = (_kapasite_sayi(plan.get("ogrenme_dk"))
+                 + _kapasite_sayi(plan.get("not_dk")))
+        plan["toplam_dk"] = yeni_dk
+        plan["soru_dk"] = max(0, yeni_dk - sabit)
+        plan["konu_anlatim_dk"] = _kapasite_sayi(gorev.get("konu_anlatim_dk"))
+        plan["soru_cozum_dk"] = _kapasite_sayi(gorev.get("soru_cozum_dk"))
+    # Checklist adımları: soru bloklarını hedef_soru oranıyla ölçekle
+    # (adım toplamı her zaman hedef_soru'yu izler; konu anlatımı kartında
+    # hedef_soru sabit kaldığı için adımlar da sabit kalır).
+    adimlar = gorev.get("adimlar")
+    if isinstance(adimlar, list) and eski_soru > 0:
+        soru_orani = float(yeni_soru) / float(eski_soru)
+        for adim in adimlar:
+            if not isinstance(adim, dict):
+                continue
+            adim_soru = _kapasite_sayi(adim.get("hedef_soru"))
+            if adim.get("adim_turu") != "soru" or adim_soru <= 0:
+                continue
+            yeni_adim = max(0, int(round(adim_soru * soru_orani)))
+            if yeni_adim <= 0 and carpan >= 1:
+                yeni_adim = adim_soru
+            adim["hedef_soru"] = yeni_adim
+            adim["baslik"] = _soru_metni_yenile(adim.get("baslik"), yeni_adim)
+    gorev["gorev_tanimi"] = _soru_metni_yenile(gorev.get("gorev_tanimi"), yeni_soru)
+    return gorev
+
+
+def _karma_tarama_gorevi_uret(tarih_iso, ders, dk, soru):
+    """Tek karma tarama bloğu: Genel Tekrar ve Karma Soru Çözümü."""
+    dk = max(1, int(dk))
+    soru = max(1, int(soru))
+    return {
+        "ders": ders,
+        "makro_konu": "Karma Tarama",
+        "mikro_konu": "Genel Tekrar ve Karma Soru Çözümü",
+        "alt_konu": None,
+        "gorev_tanimi": ("Genel Tekrar ve Karma Soru Çözümü: %d soru çöz"
+                         " (~%d dk)." % (soru, dk)),
+        "hedef_soru": soru,
+        "pedagoji_turu": "Pekiştirme",
+        "gorev_turu": "soru",
+        "gorev_tipi": "karma_tarama",
+        "tarih": tarih_iso,
+        "kaynak_gorev_id": None,
+        "is_mikro_rutin": True,
+        "mikro_hedef_soru": soru,
+        "tahmini_sure_dk": dk,
+        "konu_anlatim_dk": 0,
+        "soru_cozum_dk": dk,
+        "sure_plani": {"toplam_dk": dk, "soru_dk": dk,
+                       "konu_anlatim_dk": 0, "soru_cozum_dk": dk},
+        "adimlar": [
+            {"baslik": "Konu özetlerini ve yanlışlarını gözden geçir.",
+             "adim_turu": "tekrar", "hedef_soru": 0},
+            {"baslik": "%d karma soru çöz." % soru,
+             "adim_turu": "soru", "hedef_soru": soru},
+        ],
+    }
+
+
+def _gunluk_kapasite_olcekle(gun_gorevleri, gunluk_hedef_dk, ogrenci_id=None,
+                             konu_sureleri=None):
+    """Bir günün SEÇİLMİŞ görevlerini günlük müsaitliğe ölçekler.
+
+    Konu seçimi / müfredat sırası / TYT➔AYT kilidi DEĞİŞTİRİLMEZ.
+    - Yüksek müsaitlik (360/480 dk): toplam < %88 hedef ise blok süre ve soru
+      hedefleri tavanlara kadar büyütülür; hâlâ >= 45 dk boşluk varsa tek
+      karma tarama bloğu ile toplam %90-%105 bandına oturtulur.
+    - Düşük müsaitlik (120/180 dk): toplam hedefi aşmaz; MIN_KONU_BLOK alt
+      sınırları korunarak fazla süre kırpılır / son görevler düşürülür.
+    Dönüş: (gorevler, toplam_dk).
+    """
+    gorevler = [g for g in (gun_gorevleri or []) if isinstance(g, dict)]
+    hedef = max(0, int(gunluk_hedef_dk or 0))
+    toplam = _gun_toplam_dk(gorevler)
+    if not gorevler or hedef <= 0:
+        return gorevler, toplam
+    aktif = [g for g in gorevler if not _karma_tarama_mi(g)]
+    if toplam < hedef * KAPASITE_OLCEK_ALT_ESIK and aktif:
+        carpan = (hedef * KAPASITE_OLCEK_HEDEF_ORANI) / float(max(1, toplam))
+        for g in aktif:
+            _gorev_olcekle(g, carpan)
+        toplam = _gun_toplam_dk(gorevler)
+        bos = hedef - toplam
+        if bos >= KAPASITE_MIN_BOS_DK:
+            hedef_toplam = hedef * KAPASITE_OLCEK_HEDEF_ORANI
+            tarama_dk = int(min(bos, max(0.0, hedef_toplam - toplam)))
+            ders = aktif[0].get("ders") if aktif else None
+            if tarama_dk >= KAPASITE_MIN_BOS_DK and ders:
+                soru = max(10, min(KAPASITE_TEK_KONU_MAKS_SORU,
+                                   int(round(tarama_dk / 1.5))))
+                gorevler.append(_karma_tarama_gorevi_uret(
+                    gorevler[0].get("tarih"), ders, tarama_dk, soru))
+                toplam = _gun_toplam_dk(gorevler)
+        return gorevler, toplam
+    if toplam > hedef and aktif:
+        carpan = hedef / float(max(1, toplam))
+        for g in aktif:
+            _gorev_olcekle(g, carpan)
+        while _gun_toplam_dk(gorevler) > hedef and len(gorevler) > 1:
+            gorevler.pop()
+        toplam = _gun_toplam_dk(gorevler)
+    return gorevler, toplam
+
+
+def _gunluk_kapasite_olcekle_hafta(gorevler, kapasite, ogrenci_id=None,
+                                   konu_sureleri=None):
+    """Haftayı gün bazında ölçekler; sıralı görev listesi döndürür."""
+    if not gorevler:
+        return gorevler
+    sonuc = []
+    kapsanan = set()
+    for tarih in kapasite:
+        iso = tarih.isoformat() if hasattr(tarih, "isoformat") else str(tarih)
+        kapsanan.add(iso)
+        gun_listesi = [g for g in gorevler if (g.get("tarih") or "") == iso]
+        if not gun_listesi:
+            continue
+        olcekli, _ = _gunluk_kapasite_olcekle(
+            gun_listesi, kapasite.get(tarih, 0), ogrenci_id, konu_sureleri)
+        sonuc.extend(olcekli)
+    for g in gorevler:
+        if (g.get("tarih") or "") not in kapsanan:
+            sonuc.append(g)
+    return sonuc
+
+
 def plan_uret(baglam, referans_tarihi=None):
     """Haftalık görev planını üretir (yalnızca bellek; veritabanına yazmaz).
 
@@ -2639,22 +2841,56 @@ def plan_uret(baglam, referans_tarihi=None):
         tum_gorevler = gunluk_ders_doldur(tum_gorevler, musaitlik)
     except Exception:  # noqa: BLE001 - süzgeç hatası planı bozmaz
         pass
-    gun_ozeti = [
-        {
-            "tarih": tarih.isoformat(),
-            "gun": GUN_ADLARI[tarih.weekday()],
-            "kapasite_dk": kapasite[tarih],
-            "planlanan_dk": gun_dk[tarih],
-            "gorev_sayisi": len(gun_gorev[tarih]),
-            "dinlenme": kapasite[tarih] == 0,
-        }
-        for tarih in gunler
-    ]
+    # v2.4 (GÖREV 2): İZOLE GÜNLÜK KAPASİTE ÖLÇEKLEME. Konu seçimini, müfredat
+    # sırasını ve TYT➔AYT kilidini DEĞİŞTİRMEZ; yalnızca SEÇİLMİŞ görevlerin
+    # blok süresini/soru hedefini girilen günlük müsaitliğe (gunluk_hedef_dk)
+    # göre büyütür/küçültür. Legacy planlarda kapalıdır.
+    if not _legacy_mod:
+        try:
+            tum_gorevler = _gunluk_kapasite_olcekle_hafta(
+                tum_gorevler, kapasite, ogrenci_id=ogrenci_id,
+                konu_sureleri=konu_sureleri,
+            )
+        except Exception:  # noqa: BLE001 - ölçekleme hatası planı bozmaz
+            pass
+    if _legacy_mod:
+        gun_ozeti = [
+            {
+                "tarih": tarih.isoformat(),
+                "gun": GUN_ADLARI[tarih.weekday()],
+                "kapasite_dk": kapasite[tarih],
+                "planlanan_dk": gun_dk[tarih],
+                "gorev_sayisi": len(gun_gorev[tarih]),
+                "dinlenme": kapasite[tarih] == 0,
+            }
+            for tarih in gunler
+        ]
+        toplam_sure_dk = sum(gun_dk.values())
+    else:
+        # Ölçeklenmiş NİHAİ görev listesinden tutarlı gün özeti + toplam süre
+        # (planlanan_dk <= kapasite_dk ve toplam_sure_dk == Σ planlanan_dk).
+        gun_ozeti = []
+        toplam_sure_dk = 0
+        for tarih in gunler:
+            iso = tarih.isoformat()
+            gun_listesi = [
+                g for g in tum_gorevler if (g.get("tarih") or "") == iso
+            ]
+            gun_toplam = _gun_toplam_dk(gun_listesi)
+            toplam_sure_dk += gun_toplam
+            gun_ozeti.append({
+                "tarih": iso,
+                "gun": GUN_ADLARI[tarih.weekday()],
+                "kapasite_dk": kapasite[tarih],
+                "planlanan_dk": gun_toplam,
+                "gorev_sayisi": len(gun_listesi),
+                "dinlenme": kapasite[tarih] == 0,
+            })
     return {
         "gorevler": tum_gorevler,
         "gun_ozeti": gun_ozeti,
         "uyarilar": uyarilar,
-        "toplam_sure_dk": sum(gun_dk.values()),
+        "toplam_sure_dk": toplam_sure_dk,
         "toplam_soru": sum(int(g["hedef_soru"] or 0) for g in tum_gorevler),
     }
 
