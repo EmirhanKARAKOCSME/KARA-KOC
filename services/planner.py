@@ -41,6 +41,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 
+from data import curriculum_meta
 from services import task_steps
 
 try:  # FAZ 6C köprüsü (modül yoksa planlama aynen çalışır)
@@ -827,6 +828,7 @@ def _gorev_uret(
     eksikler=None,
     ilk_kez=False,
     deneme_id=None,
+    konu_anlatimi_aktif=True,
 ):
     """Görev sözlüğü + alt adımlar + planlanan süre.
 
@@ -911,6 +913,15 @@ def _gorev_uret(
         "tarih": tarih.isoformat(),
         "kaynak_gorev_id": kaynak_gorev_id,
     }
+    # v2.2 (FAZ 3): %0 konu -> görev TİPİ "konu_anlatimi" (zorunlu anlatım);
+    # `gorev_turu` geriye dönük uyum için "anlatim" kalır. Bu semantik
+    # yalnızca sınıf/alan bilgili planlarda uygulanır.
+    if tur == "anlatim" and ilk_kez and konu_anlatimi_aktif:
+        gorev["gorev_tipi"] = "konu_anlatimi"
+    elif tur == "karma_tarama":
+        gorev["gorev_tipi"] = "karma_tarama"
+    else:
+        gorev["gorev_tipi"] = "standart"
     if kaynaklar:
         gorev["kaynaklar"] = list(kaynaklar)
     if eksikler:
@@ -942,12 +953,17 @@ def _gorev_uret(
             alt_sayisi = max(
                 1, len([p for p in str(alt_konu).split("||") if p.strip()])
             )
-    return task_steps.gorev_zenginlestir(
+    sonuc = task_steps.gorev_zenginlestir(
         gorev,
         ogrenci_id=ogrenci_id,
         konu_sureleri=konu_sureleri,
         alt_sayisi=alt_sayisi,
     )
+    # v2.2 (FAZ 3): ayrıştırılmış konu anlatımı / soru çözümü dakikaları.
+    plan = sonuc.get("sure_plani") or {}
+    sonuc["konu_anlatim_dk"] = int(plan.get("konu_anlatim_dk") or 0)
+    sonuc["soru_cozum_dk"] = int(plan.get("soru_cozum_dk") or 0)
+    return sonuc
 
 
 def _gorev_metnini_tamamla(gorev, etiket):
@@ -1554,8 +1570,12 @@ def _tekrar_gruplari(havuz, mufredat):
     ]
 
 
-def plan_uret(baglam):
+def plan_uret(baglam, referans_tarihi=None):
     """Haftalık görev planını üretir (yalnızca bellek; veritabanına yazmaz).
+
+    `referans_tarihi` (v2.2): verilirse `1 Mayıs` çift motor geçişi bu tarihe
+    göre değerlendirilir; verilmezse `baglam["referans_tarihi"]` ya da plan
+    başlangıcı kullanılır (simülatör/test desteği).
 
     FAZ 5D: Planlama birimi ANA KONU değil MİKRO KONUdur. Ana konunun soru
     hedefi ve işi mikro konularına paylaştırılır; her mikro konu kendi görev
@@ -1592,6 +1612,8 @@ def plan_uret(baglam):
         if isinstance(anahtar, (tuple, list)) and len(anahtar) >= 3
     }
     bilinen = set(baglam.get("bilinen_mikro") or [])
+    # v2.2 (FAZ 3/4.5.4): konu anlatımı bitmiş (öğrenilmiş) konular %0 sayılmaz.
+    ogrenilmis = set(baglam.get("ogrenilmis_konular") or ())
     kurallar = baglam.get("on_kosullar") or {}
     pedagoji_map = baglam.get("pedagoji") or {}
     try:
@@ -1606,6 +1628,55 @@ def plan_uret(baglam):
         for ders, ana in (baglam.get("biten_konular") or ())
         if ders and ana
     }
+
+    # ------------------------------------------------------------------
+    # v2.2 (FAZ 1-4): havuz kilidi, mutlak sıra, referans tarihi.
+    # ------------------------------------------------------------------
+    sinif_seviyesi = baglam.get("sinif_seviyesi")
+    alan = baglam.get("alan") or baglam.get("hedef_alan")
+    # Sınıf seviyesi + alan havuzunu sert biçimde süz (AYT/alan izolasyonu).
+    mufredat = curriculum_meta.havuz_suz(mufredat, sinif_seviyesi, alan)
+    # Mutlak müfredat sırası (1'den başlayan) ve makro ünite haritası.
+    sira_map = baglam.get("sira_no_map") or curriculum_meta.sira_no_haritasi(mufredat)
+    makro_map = baglam.get("makro_unite_map") or curriculum_meta.makro_haritasi(mufredat)
+    # `1 Mayıs` tarih tetiklemeli çift motor: Mayıs–Haziran = kriz dönemi.
+    _ref = referans_tarihi if referans_tarihi is not None else baglam.get(
+        "referans_tarihi"
+    )
+    if _ref is None:
+        aktif_tarih = bas
+    elif isinstance(_ref, datetime):
+        aktif_tarih = _ref.date()
+    elif isinstance(_ref, date):
+        aktif_tarih = _ref
+    else:
+        try:
+            aktif_tarih = _tarih_oku(_ref)
+        except (TypeError, ValueError):
+            aktif_tarih = bas
+    motor2_aktif = getattr(aktif_tarih, "month", None) in (5, 6)
+    # Çekirdek TYT→AYT kilidi için normalize bilinen/biten kümeleri.
+    bilinen_norm = {curriculum_meta.normalize_konu_adi(b) for b in bilinen if b}
+    biten_mikro_adlari = {a for (_d, a) in biten if a}
+    _sinif_sayi = curriculum_meta.sinif_seviyesi_sayisi(sinif_seviyesi)
+    _biten_kumesi = {curriculum_meta.normalize_konu_adi(b) for b in biten_mikro_adlari}
+    _bilinen_hepsi = bilinen_norm | _biten_kumesi
+    # v2.2: tek branş / çekirdek kilit yalnızca sınıf-alan bilgisi verilen
+    # planlarda devreye girer (eski sınıf-bilgisiz planlar bozulmaz).
+    tek_brans_aktif = (
+        sinif_seviyesi is not None or bool(baglam.get("tek_brans_gun"))
+    )
+
+    def _cekirdek_acik(ders):
+        if not tek_brans_aktif:
+            return True
+        # 11. sınıf istisnası: AYT konuları 12. sınıf TYT kilidiyle bloke edilmez.
+        if _sinif_sayi == 11:
+            return True
+        if not str(ders).startswith("AYT"):
+            return True
+        return curriculum_meta.cekirdek_acik_mi(ders, bilinen_norm, _biten_kumesi)
+
     # Daha önce telafi kartı açılan konular (tamamlanmışsa yeniden açılmaz,
     # tamamlanmamışsa devir katmanıyla devam eder).
     telafi_kapsanan = telafi_kapsanan_konular(onceki)
@@ -1670,6 +1741,22 @@ def plan_uret(baglam):
     gun_ders_dk = {gun: {} for gun in gunler}
     planlanan = set()
     kuyruk = {}
+
+    # v2.2 (FAZ 2): aynı gün aynı ana branştan en fazla 1 ana konu görevi.
+    # Bu kural yalnızca sınıf/alan bilgisi verilen (üretim + yeni test) planlarda
+    # devreye girer; eski planlama davranışı bozulmaz.
+    tek_brans_aktif = (
+        sinif_seviyesi is not None or bool(baglam.get("tek_brans_gun"))
+    )
+    gun_brans_ana = {gun: set() for gun in gunler}
+    # Rotasyon: yan derslerin ardışık günlerde sürekli tekrarını cezalandır.
+    SIDE_BRANSLAR = {
+        "Geometri", "Fizik", "Kimya", "Biyoloji", "Edebiyat",
+        "Tarih", "Coğrafya", "Felsefe", "Din Kültürü",
+    }
+    karma_tarama_aktif = tek_brans_aktif and bool(
+        baglam.get("karma_tarama", True)
+    )
 
     def _kuyruga_ekle(oge):
         anahtar = oge.get("anahtar") or (oge["ders"], oge["ana"], oge["mikro"])
@@ -1923,13 +2010,46 @@ def plan_uret(baglam):
                 "mikro_hedef": mikro_hedef,
             })
 
-    # 4) Yeni mikro konular (ön koşulu hazır)
+    # 4) Yeni mikro konular (MUTLAK müfredat sırası / Motor 2 kredi)
     for ders, makro_dict in (mufredat or {}).items():
         if not isinstance(makro_dict, dict):
             continue
+        # FAZ 1.3: çekirdek TYT→AYT kilidi (11. sınıf istisnası hariç).
+        if not _cekirdek_acik(ders):
+            continue
+        # FAZ 4: Mayıs–Haziran + ezber/kavram dersi -> Motor 2 (kredi motoru).
+        motor2_ders = motor2_aktif and not curriculum_meta.motor1_mi(ders)
+        hedef_makrolar = None
+        if motor2_ders:
+            eksik_makrolar = []
+            for makro, mikrolar in makro_dict.items():
+                if not isinstance(mikrolar, list) or not mikrolar:
+                    continue
+                tamam = sum(
+                    1 for m in mikrolar
+                    if m in bilinen or (str(ders), str(m)) in biten
+                )
+                if tamam < len(mikrolar):
+                    ilk_sira = min(
+                        (sira_map.get((ders, m), 10 ** 6) for m in mikrolar),
+                        default=0,
+                    )
+                    eksik_makrolar.append((makro, ilk_sira))
+            if eksik_makrolar:
+                # (makro_unite_max_kredi DESC, sira_no ASC)
+                eksik_makrolar.sort(
+                    key=lambda c: (
+                        -curriculum_meta.makro_kredi_puani(c[0]),
+                        c[1],
+                    )
+                )
+                hedef_makrolar = {eksik_makrolar[0][0]}
         for makro, mikrolar in makro_dict.items():
             if not isinstance(mikrolar, list):
                 continue
+            if hedef_makrolar is not None and makro not in hedef_makrolar:
+                continue
+            makro_kredi = curriculum_meta.makro_kredi_puani(makro)
             for ana in mikrolar:
                 if ana in bilinen or (str(ders), str(ana)) in biten:
                     continue
@@ -1944,15 +2064,26 @@ def plan_uret(baglam):
                         for anahtar, deger in mikro_cozulen.items()
                         if anahtar[0] == ders and anahtar[1] == ana
                     )
+                    # v2.2: konu anlatımı zaten yapılmışsa %0 değildir.
+                    or (ders, ana) in ogrenilmis
+                )
+                _sira = sira_map.get((ders, ana), 10 ** 6)
+                # v2.2 (%0→%30): konu anlatımı bitmiş konu sıfır sayılmaz;
+                # sonraki planda SORU ÇÖZÜMÜ aşamasına geçer.
+                _tur_ana = (
+                    "pes"
+                    if (tek_brans_aktif and (ders, ana) in ogrenilmis)
+                    else "anlatim"
                 )
                 for alt, pay, sure, mikro_hedef in _mikro_dilimi(ders, makro, ana):
                     if (ders, ana, alt) in planlanan:
                         continue
                     _kuyruga_ekle({
-                        "oncelik": 4, "tur": "anlatim", "ders": ders,
+                        "oncelik": 4, "tur": _tur_ana, "ders": ders,
                         "makro": makro, "ana": ana, "mikro": alt,
                         "kalan": pay, "kaynak": None, "pay_dk": sure,
                         "mikro_hedef": mikro_hedef, "ilk_kez": ilk_kez,
+                        "sira_no": _sira, "makro_kredi": makro_kredi,
                     })
 
     # 5) Pekiştirme (öğrenilmiş ama soru hedefi dolmamış)
@@ -1963,11 +2094,13 @@ def plan_uret(baglam):
         if (str(ders), str(ana)) in biten:
             continue
         makro = _makro_bul(mufredat, ders, ana)
+        _sira_pes = sira_map.get((ders, ana), 10 ** 6)
         for alt, pay, sure, mikro_hedef in _mikro_dilimi(ders, makro, ana):
             _kuyruga_ekle({
                 "oncelik": 5, "tur": "pes", "ders": ders, "makro": makro,
                 "ana": ana, "mikro": alt, "kalan": pay, "kaynak": None,
                 "pay_dk": None, "mikro_hedef": mikro_hedef,
+                "sira_no": _sira_pes,
             })
 
     # 5b) KURAL 2 (v2.1): ilk günü (Konu Anlatımı + İlk Kavrama Testi)
@@ -2080,15 +2213,46 @@ def plan_uret(baglam):
             kalan_dk = kap - gun_dk[tarih]
             if kalan_dk < MIN_ANLAMLI_BLOK:
                 break
-            adaylar = sorted(
-                kuyruk.items(),
-                key=lambda cift: (
-                    cift[1]["oncelik"],
-                    # Ders dengesi: bugün en az görev alan ders öne geçer.
-                    gun_ders[tarih].get(cift[1]["ders"], 0),
-                    -cift[1]["kalan"],
-                ),
-            )
+            if tek_brans_aktif:
+                # v2.2: mutlak müfredat sırası (sira_no) + rotasyon cezası.
+                try:
+                    _gun_idx = gunler.index(tarih)
+                except ValueError:
+                    _gun_idx = 0
+                _onceki_branslar = (
+                    gun_brans_ana[gunler[_gun_idx - 1]] if _gun_idx > 0 else set()
+                )
+
+                def _siralama_v22(cift):
+                    _o = cift[1]
+                    _brans = curriculum_meta.ana_brans(_o["ders"])
+                    _rotasyon = 0
+                    if (
+                        _brans in SIDE_BRANSLAR
+                        and _brans in _onceki_branslar
+                        and not _o.get("eksikler")
+                        and _o["tur"] != "alarm"
+                    ):
+                        _rotasyon = 1
+                    return (
+                        _o["oncelik"],
+                        gun_ders[tarih].get(_o["ders"], 0),
+                        _rotasyon,
+                        _o.get("sira_no", 0),
+                        -_o["kalan"],
+                    )
+
+                adaylar = sorted(kuyruk.items(), key=_siralama_v22)
+            else:
+                adaylar = sorted(
+                    kuyruk.items(),
+                    key=lambda cift: (
+                        cift[1]["oncelik"],
+                        # Ders dengesi: bugün en az görev alan ders öne geçer.
+                        gun_ders[tarih].get(cift[1]["ders"], 0),
+                        -cift[1]["kalan"],
+                    ),
+                )
             yerlesti = False
             for oge_anahtar, oge in adaylar:
                 tekrar_mi = oge["tur"] in ("tekrar", "yanlis")
@@ -2133,6 +2297,15 @@ def plan_uret(baglam):
                     >= rutin_limiti
                 ):
                     continue
+                # v2.2 (FAZ 2): aynı gün aynı ana branştan en fazla 1 ana konu
+                # (mikro rutin kovası ve tekrar/defter görevleri hariç).
+                if (
+                    tek_brans_aktif
+                    and not tekrar_mi
+                    and rutin_limiti is None
+                    and curriculum_meta.ana_brans(oge["ders"]) in gun_brans_ana[tarih]
+                ):
+                    continue
                 if oge["tur"] == "anlatim":
                     if gun_yeni[tarih] >= MAKS_YENI_MIKRO_GUN:
                         continue
@@ -2161,6 +2334,11 @@ def plan_uret(baglam):
                     continue
                 hedef_soru = min(hedef_soru, ders_kalan_soru)
                 kalan_dk_gorev = min(kalan_dk_gorev, ders_kalan_dk)
+                # v2.2 (FAZ 3): %0 konu anlatımı semantiği (uzun anlatım +
+                # 15-20 soru kotası) yalnızca sınıf/alan bilgili planlarda
+                # uygulanır; eski planlar özgün davranışını korur.
+                if oge["tur"] == "anlatim" and oge.get("ilk_kez") and tek_brans_aktif:
+                    hedef_soru = min(hedef_soru, 20)
                 gorev = _soru_sayisi_sigdir(
                     oge["tur"],
                     oge["ders"],
@@ -2181,6 +2359,7 @@ def plan_uret(baglam):
                     tavan=tavan,
                     eksikler=oge.get("eksikler"),
                     ilk_kez=bool(oge.get("ilk_kez")),
+                    konu_anlatimi_aktif=tek_brans_aktif,
                     deneme_id=oge.get("deneme_id"),
                 )
                 if gorev is None:
@@ -2197,6 +2376,11 @@ def plan_uret(baglam):
                     + int(gorev.get("tahmini_sure_dk") or 0)
                 )
                 gun_mikro[tarih].add(oge_anahtar)
+                if tek_brans_aktif and not tekrar_mi and rutin_limiti is None:
+                    # Ana branş kotası: o gün bu branş artık dolu.
+                    gun_brans_ana[tarih].add(
+                        curriculum_meta.ana_brans(oge["ders"])
+                    )
                 if rutin_limiti is None:
                     gun_ana[tarih].add((oge["ders"], oge["ana"]))
                 else:
@@ -2235,6 +2419,46 @@ def plan_uret(baglam):
             " sonraki programda devam edecek."
         )
 
+    # ------------------------------------------------------------------
+    # v2.2 (FAZ 2.1 / 4.5.4): anti-starvation — süre artıyorsa aynı dersin
+    # 2./3. konusunu eklemek YERİNE "Genel Branş Denemesi / Karma Tarama" ekle.
+    # ------------------------------------------------------------------
+    if karma_tarama_aktif:
+        for tarih in gunler:
+            kalan_dk = kapasite[tarih] - gun_dk[tarih]
+            if kalan_dk < 45 or not gun_brans_ana[tarih]:
+                continue
+            dk = min(60, int(kalan_dk))
+            soru = max(10, min(40, int(dk / 1.5)))
+            _tarama = {
+                "ders": "Genel Deneme",
+                "makro_konu": "Karma Tarama",
+                "mikro_konu": "Genel Branş Denemesi / Karma Tarama",
+                "alt_konu": None,
+                "gorev_tanimi": (
+                    "🎯 Genel Branş Denemesi / Karma Tarama: %d soru çöz"
+                    " (~%d dk)." % (soru, dk)
+                ),
+                "hedef_soru": soru,
+                "pedagoji_turu": "Pekiştirme",
+                "gorev_turu": "soru",
+                "gorev_tipi": "karma_tarama",
+                "tarih": tarih.isoformat(),
+                "kaynak_gorev_id": None,
+                "is_mikro_rutin": True,
+                "mikro_hedef_soru": soru,
+            }
+            try:
+                zengin = task_steps.gorev_zenginlestir(
+                    _tarama, ogrenci_id=ogrenci_id, konu_sureleri=konu_sureleri
+                )
+            except Exception:  # noqa: BLE001 - tarama eklenemezse plan bozulmaz
+                continue
+            if int(zengin.get("tahmini_sure_dk") or 0) > kalan_dk:
+                continue
+            gun_gorev[tarih].append(zengin)
+            gun_dk[tarih] += int(zengin.get("tahmini_sure_dk") or 0)
+
     tum_gorevler = [g for tarih in gunler for g in gun_gorev[tarih]]
     # KURAL 4 son süzgeci: günlük ders limiti + tek ders 150 dk / 90 soru tavanı.
     # Akıllı planlama sırasında zaten uygulandığı için çoğunlukla idempotenttir.
@@ -2267,7 +2491,7 @@ def _soru_sayisi_sigdir(
     tur, ders, makro, mikro, tarih, kalan_soru, kalan_dk,
     kaynak, ogrenci_id, konu_sureleri, alt_konu, pedagoji, alt_sayisi=1,
     sure_dk=None, mikro_hedef=None, kaynaklar=None, tavan=None, eksikler=None,
-    ilk_kez=False, deneme_id=None,
+    ilk_kez=False, deneme_id=None, konu_anlatimi_aktif=True,
 ):
     """Kalan süreye sığan en büyük soru sayısıyla görevi üretir (yoksa None).
 
@@ -2315,7 +2539,7 @@ def _soru_sayisi_sigdir(
             konu_sureleri, alt_konu=alt_konu, pedagoji=pedagoji,
             alt_sayisi=alt_sayisi, sure_dk=sure_dk, mikro_hedef=mikro_hedef,
             kaynaklar=secili, eksikler=eksikler, ilk_kez=ilk_kez,
-            deneme_id=deneme_id,
+            deneme_id=deneme_id, konu_anlatimi_aktif=konu_anlatimi_aktif,
         )
         if int(gorev.get("tahmini_sure_dk") or 0) <= kalan_dk:
             if tur in ("devir", "pes"):

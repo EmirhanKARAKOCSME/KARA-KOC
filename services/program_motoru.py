@@ -161,8 +161,35 @@ def program_durumu_yukle(ogrenci_id):
             " WHERE ogrenci_id = ? AND (durum IS NULL OR durum = 'Aktif')"
             " GROUP BY ders, konu_adi", c, params=(ogrenci_id,),
         )
+        # v2.2 (FAZ 3/4.5.4): öğrenilmiş (konu anlatımı bitmiş) konular. Bu
+        # konular %0 sayılmaz; sonraki planda soru çözümü aşamasına geçer.
+        ogrenilmis = set()
+        try:
+            df_o = pd.read_sql_query(
+                "SELECT ders, mikro_konu FROM mikro_konu_ilerleme"
+                " WHERE ogrenci_id = ? AND ogrenme_tamam = 1",
+                c, params=(ogrenci_id,),
+            )
+            ogrenilmis |= {
+                (r["ders"], r["mikro_konu"]) for _, r in df_o.iterrows()
+            }
+        except Exception:  # noqa: BLE001 - tablo yoksa boş
+            pass
+        try:
+            df_ka = pd.read_sql_query(
+                "SELECT ders, mikro_konu FROM calisma_programi_gorevler"
+                " WHERE ogrenci_id = ? AND gorev_tipi = 'konu_anlatimi'"
+                " AND durum = 1",
+                c, params=(ogrenci_id,),
+            )
+            ogrenilmis |= {
+                (r["ders"], r["mikro_konu"]) for _, r in df_ka.iterrows()
+            }
+        except Exception:  # noqa: BLE001 - kolon/tablo yoksa boş
+            pass
     return {
         "bilinen_mikro": set(df_b["mikro_konu"].tolist()),
+        "ogrenilmis_konular": ogrenilmis,
         "cozulen": {
             (r["ders"], r["mikro_konu"]): int(r["cozulen_soru"] or 0)
             for _, r in df_s.iterrows()
@@ -900,9 +927,29 @@ def _pekistirme_bekleyen(ogrenci_id):
         return set()
 
 
+def _ogrenci_sinif_alan(ogrenci_id):
+    """Öğrencinin (sinif_seviyesi, hedef_alan) bilgisini okur (yoksa None)."""
+    try:
+        with get_connection(db_path) as conn:
+            satir = conn.execute(
+                "SELECT sinif_seviyesi, hedef_alan FROM ogrenciler WHERE id = ?",
+                (ogrenci_id,),
+            ).fetchone()
+    except Exception:  # noqa: BLE001 - tablo yoksa kısıtlama uygulanmaz
+        return None, None
+    if not satir:
+        return None, None
+    return satir[0], satir[1]
+
+
 def planlama_baglami_olustur(ogrenci_id, aktif_mufredat, alarmlar_db,
-                             paragraf_soru=None):
-    """FAZ 5C: akıllı plan motorunun girdilerini hazırlar (yalnızca okuma)."""
+                             paragraf_soru=None, referans_tarihi=None):
+    """FAZ 5C: akıllı plan motorunun girdilerini hazırlar (yalnızca okuma).
+
+    v2.2: `referans_tarihi` verilirse motor `1 Mayıs` çift motor geçişini bu
+    tarihe göre değerlendirir (simülatör/test desteği). Ayrıca öğrencinin
+    sınıf seviyesi ve alanı havuza eklenir (FAZ 1 havuz kilidi).
+    """
     durum = program_durumu_yukle(ogrenci_id)
     pedagoji = {}
     for ders, makro_dict in (aktif_mufredat or {}).items():
@@ -924,10 +971,15 @@ def planlama_baglami_olustur(ogrenci_id, aktif_mufredat, alarmlar_db,
         )
     except Exception:  # noqa: BLE001 - tespit yapılamazsa planlama sürer
         biten_konular = set()
+    # v2.2 (FAZ 1): sınıf seviyesi + alan havuz kilidi ve referans tarihi.
+    sinif_seviyesi, hedef_alan = _ogrenci_sinif_alan(ogrenci_id)
     return {
         "ogrenci_id": ogrenci_id,
         "baslangic": get_tr_now().date(),
         "gun_sayisi": 7,
+        "sinif_seviyesi": sinif_seviyesi,
+        "alan": hedef_alan,
+        "referans_tarihi": referans_tarihi,
         "musaitlik": planner.musaitlik_yukle(ogrenci_id),
         "mufredat": aktif_mufredat,
         "konu_sureleri": KONU_SURELERI_DK,
@@ -935,6 +987,8 @@ def planlama_baglami_olustur(ogrenci_id, aktif_mufredat, alarmlar_db,
         "on_kosullar": ON_KOSULLAR,
         "mikro_alt": MIKRO_ALT_KONULAR,
         "bilinen_mikro": set(durum["bilinen_mikro"]),
+        # v2.2 (FAZ 3/4.5.4): konu anlatımı bitmiş (öğrenilmiş) konular.
+        "ogrenilmis_konular": set(durum.get("ogrenilmis_konular") or ()),
         "gercek_cozulen": _gercek_cozulen_haritasi(ogrenci_id),
         "mikro_cozulen": _gercek_mikro_cozulen_haritasi(ogrenci_id),
         "onceki_gorevler": _planlama_onceki_gorevler(ogrenci_id),
@@ -962,14 +1016,21 @@ def haftalik_program_gorevleri_uret(
     filtered_pekistirme,
     filtered_ezber,
     plan_baglami=None,
+    referans_tarihi=None,
 ):
     """Motor zinciri: akıllı plan (5C) → alt başlık → soru kotalı → temel.
 
     Hiçbir aşamada veritabanına yazılmaz veya silinmez; yalnızca görev listesi
     döner. Yazmayı `program_service.program_olustur` tek transaction'da yapar;
     hata olursa hiçbir şey değişmez (eski program aktif kalır).
+
+    v2.2: `referans_tarihi` verilirse `1 Mayıs` çift motor geçişi bu tarihe
+    göre değerlendirilir (simülatör/test desteği).
     """
     uyarilar = []
+    # v2.2: referans tarihi bağlama iletilir (bağlamda yoksa).
+    if plan_baglami is not None and referans_tarihi is not None:
+        plan_baglami.setdefault("referans_tarihi", referans_tarihi)
     # KURAL 1: biten (%100) konular yedek motorlarda da rutin plana dönmez.
     biten_konular = set((plan_baglami or {}).get("biten_konular") or ())
 

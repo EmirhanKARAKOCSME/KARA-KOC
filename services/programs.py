@@ -234,6 +234,12 @@ _GOREV_EK_KOLONLAR = (
     # FAZ 6C: kaynağı (tekrar kaydı / yanlış soru) çözülen veya arşivlenen
     # görev SİLİNMEZ; yalnızca geçersiz olarak işaretlenir (geçmiş korunur).
     ("gecersiz", "INTEGER NOT NULL DEFAULT 0"),
+    # v2.2 (FAZ 2-3): görev tipi + ayrıştırılmış konu anlatımı/soru çözümü
+    # dakikaları + mikro rutin işareti. Güvenli varsayılanlarla eklenir.
+    ("gorev_tipi", "TEXT DEFAULT 'standart'"),
+    ("konu_anlatim_dk", "INTEGER DEFAULT 0"),
+    ("soru_cozum_dk", "INTEGER DEFAULT 0"),
+    ("is_mikro_rutin", "INTEGER DEFAULT 0"),
 )
 
 _SEMA_DEVIR = """
@@ -371,6 +377,19 @@ def _gorev_normallestir(gorev, sira=1):
     deneme_id = None if deneme_id in (None, "", 0) else _sayi_dogrula(
         deneme_id, "Deneme numarası", 0, 10 ** 9
     )
+    # v2.2 (FAZ 2-3): görev tipi + ayrıştırılmış dakikalar + mikro rutin.
+    gorev_tipi = _metin(gorev.get("gorev_tipi")) or "standart"
+    if gorev_tipi not in ("standart", "konu_anlatimi", "karma_tarama"):
+        gorev_tipi = "standart"
+    konu_anlatim_dk = gorev.get("konu_anlatim_dk")
+    konu_anlatim_dk = 0 if konu_anlatim_dk in (None, "") else _sayi_dogrula(
+        konu_anlatim_dk, "Konu anlatımı (dk)", 0, MAKS_GUNLUK_DAKIKA
+    )
+    soru_cozum_dk = gorev.get("soru_cozum_dk")
+    soru_cozum_dk = 0 if soru_cozum_dk in (None, "") else _sayi_dogrula(
+        soru_cozum_dk, "Soru çözümü (dk)", 0, MAKS_GUNLUK_DAKIKA
+    )
+    is_mikro_rutin = 1 if gorev.get("is_mikro_rutin") else 0
     adimlar = gorev.get("adimlar") or []
     if not isinstance(adimlar, (list, tuple)):
         raise ProgramHatasi("%d. görevin alt adımları liste olmalıdır." % sira)
@@ -392,6 +411,10 @@ def _gorev_normallestir(gorev, sira=1):
         "tarih": tarih,
         "kaynak_gorev_id": kaynak,
         "deneme_id": deneme_id,
+        "gorev_tipi": gorev_tipi,
+        "konu_anlatim_dk": konu_anlatim_dk,
+        "soru_cozum_dk": soru_cozum_dk,
+        "is_mikro_rutin": is_mikro_rutin,
         "adimlar": list(adimlar),
         "kaynaklar": kaynaklar,
     }
@@ -475,8 +498,12 @@ def program_olustur(
     program_notu=None,
     durum=DURUM_AKTIF,
     an=None,
+    referans_tarihi=None,
 ):
     """Yeni programı güvenli biçimde oluşturur ve (istenirse) aktifleştirir.
+
+    v2.2: `referans_tarihi` kabul edilir (motor `1 Mayıs` çift motor geçişi bu
+    tarihe göre planı üretir); yazma katmanı yalnızca hazır görevleri saklar.
 
     Sıra:
         1) Tüm görevler doğrulanır (tarih, ders, konu, soru, süre).
@@ -563,8 +590,10 @@ def _gorev_yaz(conn, ogrenci_id, program_id, gorev, zaman, an):
         "INSERT INTO calisma_programi_gorevler"
         " (ogrenci_id, program_id, gun, ders, makro_konu, mikro_konu,"
         "  gorev_tanimi, hedef_soru, mikro_hedef_soru, pedagoji_turu, durum, tarih,"
-        "  alt_konu, tahmini_sure_dk, kaynak_gorev_id, deneme_id)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+        "  alt_konu, tahmini_sure_dk, kaynak_gorev_id, deneme_id,"
+        "  gorev_tipi, konu_anlatim_dk, soru_cozum_dk, is_mikro_rutin)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?,"
+        "  ?, ?, ?, ?)",
         (
             ogrenci_id,
             program_id,
@@ -581,6 +610,10 @@ def _gorev_yaz(conn, ogrenci_id, program_id, gorev, zaman, an):
             gorev["tahmini_sure_dk"],
             gorev["kaynak_gorev_id"],
             gorev.get("deneme_id"),
+            gorev.get("gorev_tipi") or "standart",
+            int(gorev.get("konu_anlatim_dk") or 0),
+            int(gorev.get("soru_cozum_dk") or 0),
+            int(gorev.get("is_mikro_rutin") or 0),
         ),
     )
     yeni_id = imlec.lastrowid

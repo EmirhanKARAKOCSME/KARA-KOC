@@ -99,6 +99,21 @@ def render(ctx):
             f" **{ana_gorev_blok_sayisi} Ana Çalışma Bloğu** ve ön koşul kilitli sıralama ile oluşturulacaktır."
         )
 
+        # v2.2 (FAZ 4): simülatör/test için opsiyonel referans tarihi. Verilirse
+        # motor `1 Mayıs` çift motor geçişini bu tarihe göre uygular.
+        with st.expander("🗓️ Referans tarihi (simülasyon)", expanded=False):
+            sim_kullan = st.checkbox(
+                "Simülasyon tarihi kullan (1 Mayıs çift motor testi)",
+                key="sim_tarih_kullan",
+            )
+            sim_tarih = st.date_input(
+                "Referans tarihi",
+                value=get_tr_now().date(),
+                key="sim_referans_tarihi",
+                disabled=not sim_kullan,
+            )
+        referans_tarihi = sim_tarih if sim_kullan else None
+
         if st.button("🚀 Akıllı Haftalık Programımı Oluştur", type="primary"):
             hiz_gecmisi_kaydet(ctx.user["id"])
             with get_connection() as conn:
@@ -217,7 +232,9 @@ def render(ctx):
                         ctx.mufredat,
                         ctx.alarmlar,
                         paragraf_soru=günlük_paragraf_hedef,
+                        referans_tarihi=referans_tarihi,
                     ),
+                    referans_tarihi=referans_tarihi,
                 )
 
             # FAZ 5A: program TEK transaction'da yazılır ve hiçbir görev silinmez.
@@ -313,6 +330,10 @@ def render(ctx):
             "durum",
             "tarih",
             "program_id",
+            # v2.2 (FAZ 2-3): görev tipi + ayrıştırılmış anlatım/soru dakikaları.
+            "gorev_tipi",
+            "konu_anlatim_dk",
+            "soru_cozum_dk",
         ],
     )
 
@@ -370,12 +391,33 @@ def render(ctx):
                                 unsafe_allow_html=True,
                             )
                         else:
+                            _gtip = row.get("gorev_tipi")
+                            _kdk = row.get("konu_anlatim_dk")
+                            _karma = isinstance(_gtip, str) and _gtip == "karma_tarama"
                             st.markdown(
-                                '<div class="sim-card">📌 <b>'
-                                f" {row['ders']} - {row['mikro_konu']}</b><br>•"
+                                ('<div class="sim-card">🎯 <b>'
+                                 if _karma else
+                                 '<div class="sim-card">📌 <b>')
+                                + f" {row['ders']} - {row['mikro_konu']}</b><br>•"
                                 f" {row['gorev_tanimi']}</div>",
                                 unsafe_allow_html=True,
                             )
+                            # v2.2 (FAZ 3): %0 konu -> Konu Anlatımı rozeti + ilk adım.
+                            if (
+                                isinstance(_gtip, str)
+                                and _gtip == "konu_anlatimi"
+                            ) or (pd.notna(_kdk) and int(_kdk or 0) > 0):
+                                st.markdown(
+                                    '<div class="alarm-card-info">📖 <b>Konu'
+                                    " Anlatımı + İlk Kavrama</b> — ayrılan anlatım:"
+                                    " %d dk</div>" % int(_kdk or 0),
+                                    unsafe_allow_html=True,
+                                )
+                                _kt_adimlar = hafta_adimlari.get(int(row["id"])) or []
+                                if _kt_adimlar:
+                                    st.caption(
+                                        "1. " + str(_kt_adimlar[0]["baslik"])
+                                    )
 
                         col_g1, col_g2 = st.columns([3, 1])
                         with col_g1:

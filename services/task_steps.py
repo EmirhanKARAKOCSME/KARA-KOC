@@ -85,21 +85,26 @@ EZBER_DERSLERI = (
 # --- v2.1 Ders kategorisi (KURAL 2) ---------------------------------------
 # Kavram / Sözel Ağırlıklı: blok süresinin %55-65'i okuma, kavram tekrarı ve
 # özet çıkarmaya ayrılır; soru daha az ama kavrama odaklıdır.
+# v2.2 (FAZ 3): Ezber/Kavram dersleri TAM olarak aşağıdaki 9 dersle sınırlıdır.
 KAVRAM_SOZEL_DERSLERI = (
     "TYT Biyoloji",
     "AYT Biyoloji",
     "TYT Tarih",
     "AYT Tarih",
-    "AYT Tarih-1",
-    "AYT Tarih-2",
     "TYT Coğrafya",
     "AYT Coğrafya",
-    "AYT Coğrafya-1",
-    "AYT Coğrafya-2",
     "AYT Edebiyat",
     "TYT Felsefe",
-    "TYT Felsefe & Din",
     "TYT Din Kültürü",
+)
+# Müfredatta kullanılan türev adlar (-1/-2, "& Din", "Felsefe Grubu") için
+# geriye dönük uyum aliasları; `ders_kategorisi` bunları da kavram sayar.
+KAVRAM_SOZEL_ALIASLARI = (
+    "AYT Tarih-1",
+    "AYT Tarih-2",
+    "AYT Coğrafya-1",
+    "AYT Coğrafya-2",
+    "TYT Felsefe & Din",
     "AYT Din Kültürü",
     "AYT Felsefe Grubu",
 )
@@ -114,6 +119,9 @@ ISLEM_PRATIK_DERSLERI = (
     "AYT Fizik",
     "TYT Kimya",
     "AYT Kimya",
+    # v2.2 (FAZ 3): TYT Türkçe (Paragraf + Dil Bilgisi) artık İŞLEM/PRATİK
+    # dersidir; ezber/kavram kategorisinde değerlendirilmez.
+    "TYT Türkçe",
 )
 
 # Hedef süre payları (KURAL 2): (okuma_orani, pratik_orani).
@@ -132,12 +140,13 @@ def ders_kategorisi(ders=None):
     ad = str(ders or "").strip()
     if not ad:
         return "diger"
-    if ad in KAVRAM_SOZEL_DERSLERI or ad in ("TYT Türkçe", "YDT İngilizce"):
+    # v2.2: TYT Türkçe artık işlem dersidir; YDT İngilizce kavram kalır.
+    if ad in KAVRAM_SOZEL_DERSLERI or ad in KAVRAM_SOZEL_ALIASLARI or ad == "YDT İngilizce":
         return "kavram"
     if ad in ISLEM_PRATIK_DERSLERI:
         return "islem"
     # Önek eşleşmesi (ör. "AYT Tarih-2" gibi türevler).
-    for kategori_ders in KAVRAM_SOZEL_DERSLERI:
+    for kategori_ders in KAVRAM_SOZEL_DERSLERI + KAVRAM_SOZEL_ALIASLARI:
         if ad.startswith(kategori_ders):
             return "kavram"
     for kategori_ders in ISLEM_PRATIK_DERSLERI:
@@ -501,8 +510,23 @@ def adimlari_uret(gorev):
             )
         return adimlar
 
-    if gorev_turu == "anlatim":
-        if makro == "Deneme Tekrarı":
+    if gorev_turu in ("anlatim", "konu_anlatimi"):
+        _konu_anlatimi = (
+            gorev_turu == "konu_anlatimi"
+            or gorev.get("gorev_tipi") == "konu_anlatimi"
+        )
+        if _konu_anlatimi:
+            # v2.2 (FAZ 3): %0 konu -> ZORUNLU konu anlatımı + ilk kavrama.
+            # Metin ADIM_KONU_ANLATIMI ile başlar (geriye dönük uyum) ve
+            # "Kavram Çalışması ve Kısa Özet" ifadesini taşır.
+            adimlar.append(
+                _adim(
+                    "%s / Kavram Çalışması ve Kısa Özet" % ADIM_KONU_ANLATIMI,
+                    ADIM_IZLE,
+                )
+            )
+            adimlar.append(_adim("Kısa not çıkar.", ADIM_NOT))
+        elif makro == "Deneme Tekrarı":
             adimlar.append(_adim("Denemede yanlış yaptığın soruları incele.", ADIM_NOT))
         elif bolunmez_mi(ders, makro, mikro, pedagoji):
             # KURAL 2: bilinmeyen konuda İLK adım konu anlatımıdır.
@@ -1350,6 +1374,7 @@ def sure_plani(
     gorev_turu="anlatim",
     alt_konu=None,
     konu_suresi_dk=None,
+    konu_anlatimi=False,
 ):
     """Görevin PLANLANAN süre dökümü (dk).
 
@@ -1422,6 +1447,13 @@ def sure_plani(
             soru_dk = max(5, _yuvarla5(soru_dk * oran))
         kaynak = "gercek"
 
+    # v2.2 (FAZ 3): %0 konu anlatımı — anlatım süresi 1.45x uzatılır ve blok
+    # EN AZ %50 anlatım olacak şekilde dengelenir (anlatım >= soru çözümü).
+    if konu_anlatimi:
+        ogrenme = max(MIN_KONU_ANLATIM_DK, _yuvarla5(float(ogrenme or 0) * 1.45))
+        if (ogrenme + not_dk) < soru_dk:
+            ogrenme += (soru_dk - (ogrenme + not_dk))
+
     toplam = max(5, ogrenme + not_dk + soru_dk)
     # KURAL 2 (v2.1): okuma/pratik süre payları ve ders kategorisi. Değerler
     # mevcut süre matematiğini DEĞİŞTİRMEZ; yalnızca ders katsayı dengesinin
@@ -1445,6 +1477,9 @@ def sure_plani(
         "kaynak": kaynak,
         "hiz_kaynagi": hiz_kaynagi,
         "gercek_medyan_dk": medyan,
+        # v2.2 (FAZ 3): %0 konu anlatımı ayrıştırması (görev tablosuna yazılır).
+        "konu_anlatim_dk": (ogrenme + not_dk) if konu_anlatimi else 0,
+        "soru_cozum_dk": soru_dk if konu_anlatimi else 0,
     }
 
 
@@ -1470,6 +1505,10 @@ def gorev_suresi_hesapla(gorev, ogrenci_id=None, konu_sureleri=None, alt_sayisi=
         gorev_turu=gorev.get("gorev_turu") or "anlatim",
         alt_konu=gorev.get("alt_konu"),
         konu_suresi_dk=gorev.get("konu_suresi_dk"),
+        konu_anlatimi=bool(
+            gorev.get("gorev_tipi") == "konu_anlatimi"
+            or gorev.get("gorev_turu") == "konu_anlatimi"
+        ),
     )
 
 
