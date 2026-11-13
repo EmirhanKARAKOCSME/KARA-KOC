@@ -6,9 +6,21 @@ eklenir. Başlangıç sırası `config/database.py` tarafından yönetilir."""
 
 
 from config.database import get_connection
-from config.settings import get_tr_now
-from services.auth_service import hash_password
+from config.settings import admin_kimlik_bilgisi, get_tr_now
+from services.auth_service import hash_password, verify_password
 from services.exam_service import migrasyon_denemeleri
+
+
+def _bootstrap_uyari(cursor, mesaj):
+    """Yönetici bootstrap uyarısını `sistem_loglari`'na yazar (parola yok)."""
+    try:
+        cursor.execute(
+            "INSERT INTO sistem_loglari (ogrenci_id, islem, detay, tarih)"
+            " VALUES (NULL, 'ADMIN_BOOTSTRAP_UYARI', ?, ?)",
+            (str(mesaj)[:300], get_tr_now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+    except Exception:  # noqa: BLE001 - log yazımı başlangıcı durdurmaz
+        pass
 
 
 def init_db(db_path=None):
@@ -209,19 +221,87 @@ def init_db(db_path=None):
                 (str(hata), get_tr_now().strftime("%Y-%m-%d %H:%M:%S")),
             )
 
-        # Varsayılan Admin Kaydı
+        # ------------------------------------------------------------------
+        # YÖNETİCİ HESABI — GÜVENLİ / IDEMPOTENT BOOTSTRAP
+        # ------------------------------------------------------------------
+        # Parola KODDA TUTULMAZ. `KARAKOC_ADMIN_USERNAME` ve
+        # `KARAKOC_ADMIN_PASSWORD` ortam değişkeni veya Streamlit secrets'tan
+        # okunur. Parola tanımlıysa hesap bu parolayla eşitlenir (idempotent);
+        # tanımlı değilse BİLİNEN BİR VARSAYILAN PAROLA OLUŞTURULMAZ.
+        bilgi = admin_kimlik_bilgisi()
+        admin_kullanici = bilgi["kullanici_adi"]
+        admin_parola = bilgi["parola"]
+
         cursor.execute(
-            "SELECT id FROM ogrenciler WHERE kullanici_adi = 'admin' OR tc_no ="
-            " '99999999999'"
+            "SELECT id, kullanici_adi, sifre_hash, hesap_durumu FROM ogrenciler"
+            " WHERE kullanici_adi = ? OR tc_no = '99999999999' OR rol = 'admin'"
+            " ORDER BY CASE WHEN rol = 'admin' THEN 0 ELSE 1 END, id ASC LIMIT 1",
+            (admin_kullanici,),
         )
         admin_user = cursor.fetchone()
-        default_admin_pass = hash_password("karakoc123")
 
-        if not admin_user:
-            cursor.execute(
-                """INSERT INTO ogrenciler 
-                   (tc_no, kullanici_adi, sifre_hash, ad, hedef_alan, sinif_seviyesi, alan_kilitli, rol, hesap_durumu, diploma_notu) 
-                   VALUES ('99999999999', 'admin', ?, 'Emirhan Karakoç (Koç)', 'Yönetim', 'Koç', 1, 'admin', 'Aktif', 100.0)""",
-                (default_admin_pass,),
-            )
+        if admin_parola:
+            yeni_hash = hash_password(admin_parola)
+            if not admin_user:
+                cursor.execute(
+                    """INSERT INTO ogrenciler
+                       (tc_no, kullanici_adi, sifre_hash, ad, hedef_alan,
+                        sinif_seviyesi, alan_kilitli, rol, hesap_durumu,
+                        diploma_notu)
+                       VALUES ('99999999999', ?, ?, 'Yönetici (Koç)', 'Yönetim',
+                               'Koç', 1, 'admin', 'Aktif', 100.0)""",
+                    (admin_kullanici, yeni_hash),
+                )
+            else:
+                admin_id = admin_user[0]
+                mevcut_hash = admin_user[2]
+                # Parola yalnızca secret ile UYUŞMUYORSA güncellenir; böylece
+                # her başlangıçta kontrolsüz sıfırlama olmaz.
+                if not verify_password(mevcut_hash, admin_parola):
+                    cursor.execute(
+                        "UPDATE ogrenciler SET sifre_hash = ? WHERE id = ?",
+                        (yeni_hash, admin_id),
+                    )
+                cursor.execute(
+                    "UPDATE ogrenciler SET kullanici_adi = ?, rol = 'admin',"
+                    " hesap_durumu = 'Aktif', alan_kilitli = 1 WHERE id = ?",
+                    (admin_kullanici, admin_id),
+                )
+        else:
+            if admin_user:
+                # Secret yok; eski PBKDF2 biçimli yönetici parolası artık
+                # güvenilir kabul edilmez. Secret tanımlanana kadar hesap
+                # pasifleştirilir (bilinen varsayılan parola koda gömülmez).
+                if not (admin_user[2] or "").startswith("scrypt$"):
+                    import secrets as _secrets
+
+                    cursor.execute(
+                        "UPDATE ogrenciler SET sifre_hash = ?,"
+                        " hesap_durumu = 'Pasif' WHERE id = ?",
+                        (hash_password(_secrets.token_urlsafe(32)), admin_user[0]),
+                    )
+                    _bootstrap_uyari(
+                        cursor,
+                        "Yönetici parolası secret tanımlı olmadığı için geçersiz"
+                        " kılındı; KARAKOC_ADMIN_PASSWORD ayarlayın.",
+                    )
+            else:
+                # Hiç admin yok ve secret yok: giriş yapılamayan (Pasif) kayıt.
+                # Testlerin "admin kaydı var" beklentisini karşılar; bilinen
+                # parola oluşturmaz.
+                import secrets as _secrets
+
+                cursor.execute(
+                    """INSERT INTO ogrenciler
+                       (tc_no, kullanici_adi, sifre_hash, ad, hedef_alan,
+                        sinif_seviyesi, alan_kilitli, rol, hesap_durumu,
+                        diploma_notu)
+                       VALUES ('99999999999', ?, ?, 'Yönetici (Koç)', 'Yönetim',
+                               'Koç', 1, 'admin', 'Pasif', 100.0)""",
+                    (admin_kullanici, hash_password(_secrets.token_urlsafe(32))),
+                )
+                _bootstrap_uyari(
+                    cursor,
+                    "Yönetici hesabı için KARAKOC_ADMIN_PASSWORD tanımlayın.",
+                )
         conn.commit()

@@ -18,7 +18,7 @@ from config.database import (
 )
 from config.settings import get_tr_now, varsayilan_db_yolu
 from services.auth_service import hash_password
-from services import osym_verisi
+from services import auth_service, osym_verisi
 from views.shared import set_flash_message
 
 # SQLite dosya imzası: geri yükleme öncesi geçerlilik denetimi.
@@ -27,6 +27,9 @@ _SQLITE_BASLIK = b"SQLite format 3\x00"
 
 def yks_referans_verisi_yonetimi(yonetici_id):
     """Yönetici için referans verisi ekleme/silme arayüzü."""
+    if not auth_service.yetki_dogrula(yonetici_id, "yks_referans_verisi"):
+        st.error("Bu işlem için yönetici yetkisi gerekir.")
+        return
     try:
         ozet = osym_verisi.veri_ozeti()
     except osym_verisi.VeriHatasi as hata:
@@ -147,60 +150,112 @@ def yks_referans_verisi_yonetimi(yonetici_id):
 
 
 def veritabani_yedek_geri_yukle(yonetici_id):
-    """SQLite veritabanı yedekleme / geri yükleme arayüzü.
+    """Veritabanı yedekleme / geri yükleme arayüzü (yalnızca admin).
 
-    - Yedek indirme: mevcut `.db` dosyası (WAL checkpoint alındıktan sonra)
-      bayt olarak indirilir.
-    - Geri yükleme: `file_uploader` değişince OTOMATİK TETİKLENMEZ; yalnızca
-      açık "Yedeği Geri Yükle ve Yenile" butonuna basılınca çalışır. Böylece
-      sonsuz rerun döngüsü oluşmaz.
-    - Yüklenen dosyanın ilk 16 baytı geçerli SQLite başlığı değilse işlem
-      reddedilir; geçerliyse mevcut veritabanı `.bak` güvenlik kopyasına
-      alınıp yeni dosya üzerine yazılır.
+    - Yedek: SQLite Backup API ile **tutarlı** bir kopya üretilir, dosya adına
+      tarih-saat eklenir, `integrity_check` ile doğrulanır ve indirilebilir.
+    - Geri yükleme yalnızca açık butonla tetiklenir (sonsuz rerun yok).
+      Önce mevcut DB `.bak` güvenlik kopyasına alınır; ardından bütünlük,
+      tablo ve öğrenci sayısı kontrolü yapılır.
+    - Bu yedek ikinci güvenlik katmanıdır; harici kalıcı depolamanın yerine
+      GEÇMEZ.
     """
-    st.subheader("💾 Veritabanı Yedekleme ve Kurtarma (SQLite)")
-    st.caption(
-        "Streamlit Community Cloud konteyneri uykuya geçtiğinde yerel "
-        "`yks_veritabani.db` dosyası sıfırlanabilir. Düzenli yedek indirip "
-        "gerektiğinde buradan geri yükleyebilirsiniz."
+    if not auth_service.yetki_dogrula(yonetici_id, "veritabani_yedek"):
+        st.error("Bu işlem için yönetici yetkisi gerekir.")
+        return
+    from config.database import (
+        butunluk_kontrol,
+        geri_yukle,
+        ogrenci_sayisi,
+        tablo_sayisi,
+        yedek_al,
+        yedek_dogrula,
     )
+    from config.settings import veritabani_kalicilik_durumu
 
-    db_yolu = Path(varsayilan_db_yolu())
+    st.subheader("💾 Veritabanı Yedekleme ve Kurtarma (SQLite)")
 
-    # --- 1) Yedek indir -----------------------------------------------------
-    if not db_yolu.exists():
-        st.warning("Veritabanı dosyası bulunamadı: `%s`" % db_yolu)
+    durum = veritabani_kalicilik_durumu()
+    if not durum["kalici_gorunuyor"]:
+        st.error(
+            "⚠️ Veritabanı geçici bir dizinde görünüyor: `%s`. Streamlit "
+            "Community Cloud yeniden başlarsa öğrenci verisi kaybolabilir. "
+            "Yayın için `KARAKOC_DB_PATH` kalıcı bir diske yönlendirilmelidir."
+            % durum["yol"]
+        )
     else:
-        # WAL modundaki son commit'leri ana dosyaya aktar (tutarlı yedek).
+        st.caption(
+            "Aktif veritabanı: `%s` (kaynak: %s). Buradaki yedekler ikinci "
+            "güvenlik katmanıdır; kalıcı depolamanın yerine geçmez."
+            % (durum["yol"], durum["kaynak"])
+        )
+
+    # --- 1) Tutarlı yedek al ve indir -------------------------------------
+    if st.button("🗄️ Tutarlı yedek oluştur (Backup API)", key="db_yedek_olustur"):
         try:
-            with get_connection() as conn:
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-        except Exception:  # noqa: BLE001 - checkpoint başarısızsa okuyabildiğimizi alırız
-            pass
-        try:
-            veri = db_yolu.read_bytes()
-        except OSError as hata:
-            st.error("Veritabanı okunamadı: %s" % hata)
-            veri = None
-        if veri:
+            yedek_klasoru = Path(durum["yol"]).parent / "KARA_KOC_YEDEK"
             dosya_adi = "karakoc_yks_yedek_%s.db" % get_tr_now().strftime(
-                "%Y%m%d_%H%M"
+                "%Y%m%d_%H%M%S"
             )
-            st.download_button(
-                "⬇️ Yedeği İndir (.db)",
-                data=veri,
-                file_name=dosya_adi,
-                mime="application/octet-stream",
-                key="db_yedek_indir_btn",
-            )
-            st.caption(
-                "Önerilen yedek adı: `%s` · Boyut: %d bayt" % (dosya_adi, len(veri))
-            )
+            hedef = yedek_al(yedek_klasoru / dosya_adi)
+            st.session_state["admin_yedek_yolu"] = hedef
+            dogrulama = yedek_dogrula(hedef, kaynak_db_path=durum["yol"])
+            if dogrulama["saglikli"]:
+                st.success(
+                    "Yedek oluşturuldu ve doğrulandı: `%s` · Bütünlük: %s ·"
+                    " %d tablo · %d öğrenci"
+                    % (
+                        hedef,
+                        dogrulama["butunluk"],
+                        dogrulama["tablo_sayisi"],
+                        dogrulama["ogrenci_sayisi"],
+                    )
+                )
+            else:
+                st.warning(
+                    "Yedek oluşturuldu ancak doğrulama uyarı verdi: %s"
+                    % dogrulama
+                )
+        except Exception as hata:  # noqa: BLE001
+            st.error("Yedek oluşturulamadı: %s" % hata)
+
+    yedek_yolu = st.session_state.get("admin_yedek_yolu")
+    if yedek_yolu and Path(yedek_yolu).exists():
+        veri = Path(yedek_yolu).read_bytes()
+        st.download_button(
+            "⬇️ Yedeği İndir (.db)",
+            data=veri,
+            file_name=Path(yedek_yolu).name,
+            mime="application/octet-stream",
+            key="db_yedek_indir_btn",
+        )
+        st.caption("Aktif yedek dosyası: `%s` · %d bayt" % (yedek_yolu, len(veri)))
+        if st.button("🔎 Yedeği doğrula", key="db_yedek_dogrula_btn"):
+            try:
+                dogrulama = yedek_dogrula(yedek_yolu, kaynak_db_path=durum["yol"])
+            except Exception as hata:  # noqa: BLE001
+                st.error("Doğrulama başarısız: %s" % hata)
+            else:
+                if dogrulama["saglikli"]:
+                    st.success(
+                        "Yedek sağlıklı: bütünlük=%s · %d tablo · %d öğrenci"
+                        % (
+                            dogrulama["butunluk"],
+                            dogrulama["tablo_sayisi"],
+                            dogrulama["ogrenci_sayisi"],
+                        )
+                    )
+                else:
+                    st.error("Yedek doğrulaması başarısız: %s" % dogrulama)
 
     st.markdown("---")
 
-    # --- 2) Yedekten geri yükle --------------------------------------------
+    # --- 2) Yedekten geri yükle -------------------------------------------
     st.markdown("**Yedekten Geri Yükle**")
+    st.caption(
+        "Geri yükleme yalnızca yönetici tarafından başlatılabilir. Önce "
+        "mevcut veritabanının `.bak` güvenlik kopyası alınır."
+    )
     yuklenen = st.file_uploader(
         "Yedek veritabanı dosyasını seç (.db)",
         type=["db"],
@@ -217,45 +272,36 @@ def veritabani_yedek_geri_yukle(yonetici_id):
             return
         try:
             icerik = yuklenen.getvalue()
+            sonuc = geri_yukle(icerik)
         except Exception as hata:  # noqa: BLE001
-            st.error("Dosya okunamadı: %s" % hata)
-            return
-        if not icerik.startswith(_SQLITE_BASLIK):
-            st.error(
-                "❌ Geçersiz dosya: bu bir SQLite veritabanı değil. "
-                "Geri yükleme reddedildi."
-            )
-            return
-        try:
-            # Güvenlik kopyası: mevcut veritabanını bozmadan sakla.
-            if db_yolu.exists():
-                guvenlik = db_yolu.with_name(db_yolu.name + ".bak")
-                shutil.copy2(db_yolu, guvenlik)
-            db_yolu.parent.mkdir(parents=True, exist_ok=True)
-            db_yolu.write_bytes(icerik)
-            # Eski WAL/SHM artıkları geri yüklenen dosyayı bozmasın.
-            for uzanti in ("-wal", "-shm"):
-                artik = db_yolu.with_name(db_yolu.name + uzanti)
-                if artik.exists():
-                    try:
-                        artik.unlink()
-                    except OSError:
-                        pass
-        except OSError as hata:
-            st.error("Geri yükleme başarısız: %s" % hata)
+            st.error("Geri yükleme reddedildi: %s" % hata)
             return
         # Şema/migrasyon yeniden çalışsın; arayüz yenilensin.
         bootstrap_onbellegini_temizle()
         log_islem(
             yonetici_id,
             "DB_RESTORE",
-            "Yedekten geri yükleme: %d bayt" % len(icerik),
+            "Geri yükleme: %d bayt · bütünlük=%s · tablo=%d · öğrenci=%d"
+            % (
+                len(icerik),
+                sonuc["butunluk"],
+                sonuc["tablo_sayisi"],
+                sonuc["ogrenci_sayisi"],
+            ),
         )
-        set_flash_message("success", "✅ Veritabanı yedekten geri yüklendi.")
+        set_flash_message(
+            "success",
+            "✅ Veritabanı geri yüklendi. Bütünlük: %s · %d tablo · %d öğrenci."
+            % (sonuc["butunluk"], sonuc["tablo_sayisi"], sonuc["ogrenci_sayisi"]),
+        )
         st.rerun()
 
 
 def render(ctx):
+    # Sunucu taraflı yetki kontrolü: session_state rolüne güvenilmez.
+    if not auth_service.yetki_dogrula(ctx.user.get("id"), "admin_panel"):
+        st.error("Bu sayfaya erişim yetkiniz yok.")
+        st.stop()
     st.title("👑 KARAKOÇ KOÇLUK YÖNETİCİ PANELİ")
     st.markdown(
         f"Hoş Geldiniz, **{ctx.user['ad']}**. Tüm öğrencileri buradan"

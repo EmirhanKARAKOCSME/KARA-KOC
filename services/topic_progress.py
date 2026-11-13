@@ -12,6 +12,7 @@ import streamlit as st
 from config.database import get_connection
 from config.settings import get_tr_now
 from data.curriculum import mufredat_klasik, mufredat_maarif_9
+from data.curriculum_maarif_11 import mufredat_maarif_11
 from data.prerequisites import ON_KOSULLAR
 from data.subtopics import MIKRO_ALT_KONULAR
 from data.weights_and_times import SINIF_SEVIYE_SKORU, SORU_AGIRLIKLARI
@@ -515,10 +516,21 @@ def makro_unite_ilerleme_durumu(ogrenci_id, ders, makro_unite, mufredat):
 
 
 def build_student_curriculum(sinif, alan):
+    """Öğrencinin sınıfına/alanına göre AKTİF müfredat havuzunu döndürür.
+
+    - 9. Sınıf  : Maarif 9/10 havuzu.
+    - 10. Sınıf : klasik TYT havuzu (AYT kilitli).
+    - 11. Sınıf : Maarif 11. sınıf havuzu (ayrı yapı; klasik AYT değildir).
+    - 12/Mezun  : klasik TYT + seçilen alanın AYT'si (+ Dil için YDT).
+    """
     if sinif == "9. Sınıf":
         return mufredat_maarif_9
     elif sinif == "10. Sınıf":
         return mufredat_klasik.get("TYT", {})
+    elif sinif == "11. Sınıf":
+        # 2026–2027'de Maarif Modeli 11. sınıflarda uygulanır. Bu havuz
+        # `mufredat_klasik` ile karıştırılmaz; ayrı ve açık bir yapıdır.
+        return mufredat_maarif_11
     else:
         birlesik_mufredat = {}
         tyt_dict = mufredat_klasik.get("TYT", {})

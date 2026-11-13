@@ -493,3 +493,36 @@ SINIF_SEVIYE_SKORU = {
     "12. Sınıf": 4,
     "Mezun": 4
 }
+
+# ---------------------------------------------------------------------------
+# EKSİK SÜRELERİ TAMAMLAMA (TAHMİNİ)
+# ---------------------------------------------------------------------------
+# Yeni eklenen Maarif 9/10/11, EA, Sözel ve YDT mikro konularının bir kısmı
+# KONU_SURELERI_DK içinde açıkça tanımlı değildir. Burada mevcut 40–90 dk
+# ölçeğine uygun TAHMİNİ süreler atanır. Bu değerler kesin değildir; gerçek
+# çalışma medyanıyla kişiselleştirme `task_steps` içinde ayrıca uygulanır.
+# Mevcut açık değerler ASLA değiştirilmez (setdefault kullanılır).
+from data.subtopics import MIKRO_ALT_KONULAR
+
+
+def tahmini_sure_dk(mikro_konu):
+    """Süresi tanımlı olmayan mikro konu için tutarlı TAHMİNİ süre (dk).
+
+    Kural: 30 + 10 × (alt başlık sayısı), 40–90 aralığında sınırlandırılır.
+    Anlatım süresi soru çözme süresine eşitlenmez; bu yalnızca konu
+    anlatımı/öğrenme süresi tahminidir.
+    """
+    alt = MIKRO_ALT_KONULAR.get(mikro_konu) or []
+    return min(90, max(40, 30 + 10 * len(alt)))
+
+
+# Alias: klasik TYT "Hücre Yapısı ve Organeller" ile Maarif
+# "Hücre Yapısı, Organeller ve Çekirdek" aynı kapsamı paylaşır.
+KONU_SURELERI_DK.setdefault(
+    "Hücre Yapısı ve Organeller",
+    KONU_SURELERI_DK.get("Hücre Yapısı, Organeller ve Çekirdek", 80),
+)
+
+for _mikro in MIKRO_ALT_KONULAR:
+    KONU_SURELERI_DK.setdefault(_mikro, tahmini_sure_dk(_mikro))
+

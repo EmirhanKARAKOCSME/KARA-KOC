@@ -219,41 +219,62 @@ _ON_KOSULLAR_TEMEL = {
         "on_kosul": ["Mayoz ve Eşeyli Üreme"],
         "min_sinif": 2,
     },
-    "İnsan Fizyolojisi - Sinir ve Endokrin Sistem": {
+    # v2.5: "İnsan Fizyolojisi - ..." eski/alternatif adları gerçek müfredat
+    # mikro konularına ayrıştırıldı (tek string yerine kanonik başlıklar).
+    "Sinir Sistemi ve Duyu Organları": {
         "ders": "AYT Biyoloji",
         "on_kosul": ["Hücre Yapısı ve Organeller", "Hücre Zarından Madde Geçişleri"],
         "min_sinif": 3,
     },
-    "İnsan Fizyolojisi - Dolaşım ve Bağışıklık": {
+    "Endokrin Sistem": {
         "ders": "AYT Biyoloji",
-        "on_kosul": ["İnsan Fizyolojisi - Sinir ve Endokrin Sistem"],
+        "on_kosul": ["Hücre Yapısı ve Organeller", "Hücre Zarından Madde Geçişleri"],
         "min_sinif": 3,
     },
-    "İnsan Fizyolojisi - Solunum ve Boşaltım": {
+    "Dolaşım ve Bağışıklık Sistemi": {
         "ders": "AYT Biyoloji",
-        "on_kosul": ["İnsan Fizyolojisi - Dolaşım ve Bağışıklık"],
+        "on_kosul": ["Sinir Sistemi ve Duyu Organları", "Endokrin Sistem"],
         "min_sinif": 3,
     },
-    "Nükleik Asitler ve Protein Sentezi": {
+    "Solunum Sistemi": {
+        "ders": "AYT Biyoloji",
+        "on_kosul": ["Dolaşım ve Bağışıklık Sistemi"],
+        "min_sinif": 3,
+    },
+    "Üriner Sistem": {
+        "ders": "AYT Biyoloji",
+        "on_kosul": ["Dolaşım ve Bağışıklık Sistemi"],
+        "min_sinif": 3,
+    },
+    "Genden Proteine (Protein Sentezi)": {
         "ders": "AYT Biyoloji",
         "on_kosul": ["Canlıların Temel Bileşenleri", "Hücre Yapısı ve Organeller"],
         "min_sinif": 4,
     },
-    "Hücresel Solunum ve Fotosentez": {
+    "Fotosentez ve Kemosentez": {
         "ders": "AYT Biyoloji",
-        "on_kosul": ["Canlıların Temel Bileşenleri", "Nükleik Asitler ve Protein Sentezi"],
+        "on_kosul": ["Canlıların Temel Bileşenleri", "Genden Proteine (Protein Sentezi)"],
         "min_sinif": 4,
     },
-    "Bitki Biyolojisi - Madde Taşınması ve Beslenme": {
+    "Hücresel Solunum": {
         "ders": "AYT Biyoloji",
-        "on_kosul": ["Hücre Zarından Madde Geçişleri", "Hücresel Solunum ve Fotosentez"],
+        "on_kosul": ["Canlıların Temel Bileşenleri", "Genden Proteine (Protein Sentezi)"],
+        "min_sinif": 4,
+    },
+    "Bitkisel Dokular ve Organlar": {
+        "ders": "AYT Biyoloji",
+        "on_kosul": [
+            "Hücre Zarından Madde Geçişleri",
+            "Hücresel Solunum",
+            "Fotosentez ve Kemosentez",
+        ],
         "min_sinif": 4,
     },
 
     # --------------------------------------------------------------------------
     # 6. AYT EDEBİYAT & SOSYAL-1 / SOSYAL-2
     # --------------------------------------------------------------------------
-    "Divan Edebiyaı": {
+    "Divan Edebiyatı": {
         "ders": "AYT Edebiyat",
         "on_kosul": ["Şiir Bilgisi ve Edebi Sanatlar", "İslamiyet Öncesi ve Geçiş Dönemi Türk Edebiyatı"],
         "min_sinif": 2,
@@ -273,14 +294,14 @@ _ON_KOSULLAR_TEMEL = {
         "on_kosul": ["İlk ve Orta Çağlarda Türk Dünyası", "İslam Medeniyetinin Doğuşu"],
         "min_sinif": 1,
     },
-    "Beylikten Devlete Osmanlı Siyaseti": {
+    "Beylikten Devlete Osmanlı": {
         "ders": "AYT Tarih-1",
         "on_kosul": ["Türk-İslam Devletleri"],
         "min_sinif": 2,
     },
     "Milli Mücadele Dönemi": {
         "ders": "AYT Tarih-1",
-        "on_kosul": ["XX. Yüzyıl Başlarında Osmanlı Devleti"],
+        "on_kosul": ["XX. Yüzyıl Başlarında Osmanlı"],
         "min_sinif": 4,
     },
     "Atatürk İlkeleri ve İnkılapları": {
@@ -298,14 +319,14 @@ _ON_KOSULLAR_TEMEL = {
         "on_kosul": ["İklim Bilgisi", "Türkiye’nin Yer Şekilleri"],
         "min_sinif": 3,
     },
-    "Klasik Mantık": {
+    "Klasik Mantık ve Mantık-Dil": {
         "ders": "AYT Felsefe Grubu",
         "on_kosul": ["Felsefi Düşünce"],
         "min_sinif": 3,
     },
     "Sembolik Mantık": {
         "ders": "AYT Felsefe Grubu",
-        "on_kosul": ["Klasik Mantık"],
+        "on_kosul": ["Klasik Mantık ve Mantık-Dil"],
         "min_sinif": 4,
     },
 

@@ -21,6 +21,7 @@ import re
 import unicodedata
 
 from data.curriculum import mufredat_klasik, mufredat_maarif_9
+from data.curriculum_maarif_11 import mufredat_maarif_11
 from data.weights_and_times import SORU_AGIRLIKLARI
 
 
@@ -328,6 +329,12 @@ def havuz_suz(mufredat, sinif_seviyesi=None, alan=None):
         elif sinif == 10:
             if is_ayt:
                 continue
+        elif sinif == 11:
+            # 11. sınıf Maarif havuzu kendi başına gelir; klasik AYT filtresi
+            # uygulanmaz (Maarif 11 ile klasik AYT farklı yapılardır).
+            if ders not in mufredat_maarif_11 and is_ayt:
+                if not ders_alana_uygun_mu(ders, alan):
+                    continue
         elif is_ayt and not ders_alana_uygun_mu(ders, alan):
             continue
         sonuc[ders] = makro_dict

@@ -2,9 +2,15 @@
 __pycache__/
 *.py[cod]
 
-# SQLite calisma dosyalari (WAL/SHM commit edilmez; ana .db takip edilir)
+# SQLite calisma dosyalari
+# GERCEK OGRENCI VERISI ICEREN YEREL VERITABANI ASLA COMMIT EDILMEZ.
+*.db
 *.db-wal
 *.db-shm
+*.db.bak
 
 # Yerel yedekler
 KARA_KOC_YEDEK/
+
+# Streamlit sirlari (gercek degerler ASLA commit edilmez)
+.streamlit/secrets.toml

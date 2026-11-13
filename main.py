@@ -13,7 +13,7 @@ Katmanlar:
 import streamlit as st
 
 from config.database import bootstrap_database
-from services import study_sessions
+from services import auth_service, study_sessions
 from services.alarm_service import hesapla_tum_alarmlar
 from services.topic_progress import (
     build_student_curriculum,
@@ -87,6 +87,21 @@ except Exception:
     current_user["streak_count"] = current_user.get("streak_count", 0)
 
 # ==============================================================================
+# 4b) SUNUCU TARAFLI ROL DOĞRULAMA
+# ==============================================================================
+# `st.session_state` içindeki `rol` tek başına yetki kanıtı DEĞİLDİR.
+# Rol, her istekte veritabanından okunur. Hesap silinmiş/pasifse oturum kapanır.
+db_rol = auth_service.kullanici_rolu(current_user["id"])
+if db_rol is None:
+    st.session_state.active_user = None
+    st.error(
+        "Oturumunuz geçersiz veya hesabınız pasif durumda. Lütfen tekrar"
+        " giriş yapın."
+    )
+    st.stop()
+current_user["rol"] = db_rol  # oturum ipucu DB ile eşitlenir
+
+# ==============================================================================
 # 5) ÖĞRENCİ MÜFREDATI VE GÖRÜNÜM BAĞLAMI
 # ==============================================================================
 aktif_mufredat_hiyerarsisi = build_student_curriculum(
@@ -106,7 +121,8 @@ if current_user.get("rol") != "admin" and st.session_state.get("kamp_aktif"):
 # ==============================================================================
 # 6) YÖNETİCİ PANELİ (panel sonunda st.stop() ile öğrenci kokpitime geçilmez)
 # ==============================================================================
-if current_user["rol"] == "admin":
+# Karar DB'den gelen `db_rol` ile verilir; session_state rolüne güvenilmez.
+if db_rol == "admin":
     admin_panel.render(ctx)
 
 # ==============================================================================

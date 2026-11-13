@@ -171,6 +171,29 @@ class UiSmokeTestleri(unittest.TestCase):
         sonra = os.path.getsize(gercek) if os.path.exists(gercek) else None
         self.assertEqual(once, sonra, "Testler gerçek veritabanını değiştirmemeli")
 
+    def _admin_paneli_gorunuyor_mu(self, at):
+        basliklar = [t.value for t in at.title]
+        return any("YÖNETİCİ PANELİ" in str(b) for b in basliklar)
+
+    def test_05_ogrenci_admin_panelini_goremez(self):
+        at = self.calistir(self.ogrenci)
+        self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
+        self.assertFalse(self._admin_paneli_gorunuyor_mu(at))
+
+    def test_06_yonetici_panelini_gorur(self):
+        at = self.calistir(self.koc)
+        self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
+        self.assertTrue(self._admin_paneli_gorunuyor_mu(at))
+
+    def test_07_sahte_admin_rolu_reddedilir(self):
+        # Oturum rolü arayüzden 'admin' yapılsa bile DB rolü 'ogrenci' ise
+        # yönetici paneli AÇILMAMALI (sunucu taraflı doğrulama).
+        sahte = dict(self.ogrenci)
+        sahte["rol"] = "admin"
+        at = self.calistir(sahte)
+        self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
+        self.assertFalse(self._admin_paneli_gorunuyor_mu(at))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,4 +1,4 @@
-"""FAZ 5A - Haftalık çalışma programı sürümleme servisi.
+""" Haftalık çalışma programı sürümleme servisi.
 
 Tasarım ilkesi: **program yenilemek geçmişi silmez.**
 

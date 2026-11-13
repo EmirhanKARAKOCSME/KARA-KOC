@@ -1,11 +1,14 @@
-"""Refactoring veri eşdeğerliği testleri (FAZ A kabul kriterleri).
+"""Refactoring veri eşdeğerliği ve veri bütünlüğü testleri.
 
 Veriler `main.py` içindeyken hesaplanan parmak izleri (md5) ile `data/`
-paketindeki değerlerin **birebir aynı** olduğunu doğrular. Parmak izleri
-refactoring öncesi dosyadan alınmıştır: kazara yapılan bir veri değişikliği
-(konu kaybı, süre/ağırlık değişimi, sıra bozulması) bu testi kırar.
+paketindeki değerlerin **birebir aynı** olduğunu doğrular. Kazara yapılan bir
+veri değişikliği (konu kaybı, süre/ağırlık değişimi, sıra bozulması) bu testi
+kırar.
 
-Veri bilinçli olarak güncellenirse parmak izi sabitleri de güncellenir.
+v2.5 (bilinçli veri genişlemesi): Maarif 9/10/11, EA, Sözel ve YDT mikro
+konuları eklendi. Bu nedenle `MIKRO_ALT_KONULAR`, `ON_KOSULLAR` ve
+`KONU_SURELERI_DK` parmak izleri / sayıları güncellendi. Klasik TYT ve AYT
+Sayısal veri sözlüklerinin izleri **değişmedi** (korundu).
 
 Çalıştırma:
     python tests/test_veri_esdegerligi.py
@@ -40,11 +43,11 @@ from data.weights_and_times import (  # noqa: E402
 PARMAK_IZLERI = {
     "mufredat_klasik": "ccddd37d",
     "mufredat_maarif_9": "4b37301e",
-    "MIKRO_ALT_KONULAR": "0a7b101f",
+    "MIKRO_ALT_KONULAR": "16ec8308",
     "_ALT_TYT": "e0e14465",
     "_ALT_AYT_SAYISAL": "530f0b8c",
-    "ON_KOSULLAR": "77d20001",
-    "KONU_SURELERI_DK": "59eeb572",
+    "ON_KOSULLAR": "3f0d2bf2",
+    "KONU_SURELERI_DK": "613d5583",
     "SORU_AGIRLIKLARI": "9044afb4",
     "SINIF_SEVIYE_SKORU": "0dbb7bf1",
 }
@@ -95,7 +98,9 @@ class VeriEsdegerligiTestleri(unittest.TestCase):
     def test_on_kosul_birlesimi_ayni(self):
         """{**EK, **TEMEL} sonucu tek veri yapısında birebir korundu."""
         self.assertEqual(parmak_izi(ON_KOSULLAR), PARMAK_IZLERI["ON_KOSULLAR"])
-        self.assertEqual(len(ON_KOSULLAR), 70)
+        # v2.5: kopuk bağlantılar düzeltilip eski adlar kanonik başlıklara
+        # ayrıştırıldığı için kayıt sayısı 70 -> 73 oldu.
+        self.assertEqual(len(ON_KOSULLAR), 73)
 
     def test_on_kosul_ek_artik_yok(self):
         """Birleşik veri tek yapıya taşındı; `ON_KOSULLAR_EK` kaldırıldı."""

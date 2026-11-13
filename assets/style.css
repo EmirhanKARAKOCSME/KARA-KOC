@@ -61,6 +61,8 @@
 .stTabs [data-baseweb="tab-list"] {
     gap: 6px;
     overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
 }
 .stTabs [data-baseweb="tab"] {
     height: 42px;
@@ -227,5 +229,27 @@
         height: auto;
         min-height: 44px;
         padding: 8px 10px;
+    }
+}
+
+/* Yatay telefon (kısa yükseklik): dikey boşluğu azalt, dokunmatiği koru. */
+@media (orientation: landscape) and (max-height: 520px) {
+    .block-container {
+        padding-top: 0.5rem;
+        padding-bottom: 0.5rem;
+    }
+    .stButton > button,
+    .stDownloadButton > button {
+        min-height: 44px;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    .stTabs [data-baseweb="tab"] {
+        min-height: 44px;
+        font-size: 0.82rem;
+        white-space: nowrap;
     }
 }

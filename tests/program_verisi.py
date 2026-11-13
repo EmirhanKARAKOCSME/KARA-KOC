@@ -97,6 +97,7 @@ def baglam(
     baslangic=None,
     paragraf_soru=20,
     ogrenci_id=1,
+    mikro_alt=None,
 ):
     """`planner.plan_uret` için gerçek verilerle bağlam kurar."""
     return {
@@ -112,7 +113,9 @@ def baglam(
         "konu_sureleri": konu_sureleri or KONU_SURELERI_DK,
         "soru_agirliklari": SORU_AGIRLIKLARI,
         "on_kosullar": ON_KOSULLAR,
-        "mikro_alt": mikro_alt_konular(),
+        # v2.5: testler "alt başlığı olmayan konu" senaryosunu yapay olarak
+        # kurmak için kendi mikro_alt haritasını verebilir.
+        "mikro_alt": mikro_alt if mikro_alt is not None else mikro_alt_konular(),
         # Polinomlar'ın ön koşulu olan TYT konuları biliniyor varsayılır.
         "bilinen_mikro": set(bilinen_mikro if bilinen_mikro is not None
                              else ("Fonksiyonlar", "Çarpanlara Ayırma")),

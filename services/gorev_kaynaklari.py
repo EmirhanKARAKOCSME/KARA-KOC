@@ -1,4 +1,4 @@
-"""FAZ 6C - Program görevi <-> kaynak (tekrar / yanlış soru) bağı.
+"""Program görevi <-> kaynak (tekrar / yanlış soru) bağı.
 
 Tasarım ilkeleri:
 

@@ -16,6 +16,7 @@ Güvenlik kuralları (değiştirilmemeli):
 - Şema/migration kodu değişince `config.settings.DB_BOOTSTRAP_SURUMU`
   artırılır; bu, cache anahtarını değiştirip başlangıcı yeniden çalıştırır.
 """
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -61,6 +62,196 @@ def log_islem(ogrenci_id, islem, detay):
             c.commit()
     except Exception:
         pass
+
+
+# ==============================================================================
+# YEDEKLEME / BÜTÜNLÜK / GERİ YÜKLEME (SQLite Backup API)
+# ==============================================================================
+# Geçerli bir SQLite dosyasının ilk 16 baytı sabittir.
+_SQLITE_BASLIK = b"SQLite format 3\x00"
+
+
+def butunluk_kontrol(db_path=None) -> str:
+    """`PRAGMA integrity_check` sonucunu döndürür ('ok' = sağlıklı)."""
+    conn = sqlite3.connect(db_yolu(db_path))
+    try:
+        return str(conn.execute("PRAGMA integrity_check").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def tablo_sayisi(db_path=None) -> int:
+    """Veritabanındaki tablo sayısı (geri yükleme sonrası sağlık kontrolü)."""
+    conn = sqlite3.connect(db_yolu(db_path))
+    try:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+
+
+def ogrenci_sayisi(db_path=None) -> int:
+    """Kayıtlı öğrenci sayısı (tablo yoksa 0)."""
+    conn = sqlite3.connect(db_yolu(db_path))
+    try:
+        return int(conn.execute("SELECT COUNT(*) FROM ogrenciler").fetchone()[0])
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+
+
+def yedek_al(hedef_yol, db_path=None) -> str:
+    """SQLite Backup API ile TUTARLI bir yedek dosyası üretir.
+
+    Düz dosya kopyası yerine `sqlite3.Connection.backup` kullanılır; WAL
+    modundaki commit'ler de yedeğe dâhil edilir ve yedek alınırken okuma
+    kilitlenmesi olmaz. Üretilen yedek `integrity_check` ile doğrulanır.
+    """
+    kaynak = db_yolu(db_path)
+    hedef = Path(hedef_yol).expanduser().resolve()
+    hedef.parent.mkdir(parents=True, exist_ok=True)
+    src = sqlite3.connect(kaynak)
+    try:
+        dst = sqlite3.connect(str(hedef))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+    kontrol = sqlite3.connect(str(hedef))
+    try:
+        sonuc = str(kontrol.execute("PRAGMA integrity_check").fetchone()[0])
+    finally:
+        kontrol.close()
+    if sonuc != "ok":
+        raise sqlite3.DatabaseError("Yedek bütünlük kontrolü başarısız: %s" % sonuc)
+    return str(hedef)
+
+
+def geri_yukle(icerik, db_path=None) -> dict:
+    """Yedek baytlarını aktif veritabanına güvenli biçimde geri yükler.
+
+    Adımlar:
+    1. SQLite başlığı doğrulanır (geçersiz dosya reddedilir).
+    2. Mevcut veritabanı `.bak` güvenlik kopyasına alınır.
+    3. WAL/SHM artıkları temizlenir (geri yüklenen dosyayı bozmasın).
+    4. Geri yükleme sonrası `integrity_check` yapılır.
+
+    Geri yükleme yalnızca yönetici tarafından çağrılmalıdır.
+    """
+    if not isinstance(icerik, (bytes, bytearray)):
+        raise sqlite3.DatabaseError("Yedek içeriği bayt dizisi olmalı.")
+    if not bytes(icerik).startswith(_SQLITE_BASLIK):
+        raise sqlite3.DatabaseError("Geçersiz dosya: SQLite veritabanı değil.")
+
+    hedef = Path(db_yolu(db_path))
+    guvenlik = None
+    if hedef.exists():
+        guvenlik = hedef.with_name(hedef.name + ".bak")
+        shutil.copy2(hedef, guvenlik)
+
+    hedef.parent.mkdir(parents=True, exist_ok=True)
+    hedef.write_bytes(bytes(icerik))
+    for uzanti in ("-wal", "-shm"):
+        artik = hedef.with_name(hedef.name + uzanti)
+        if artik.exists():
+            try:
+                artik.unlink()
+            except OSError:
+                pass
+
+    sonuc = butunluk_kontrol(db_path)
+    if sonuc != "ok":
+        raise sqlite3.DatabaseError("Geri yükleme sonrası bütünlük hatası: %s" % sonuc)
+    return {
+        "butunluk": sonuc,
+        "yol": str(hedef),
+        "guvenlik_kopyasi": str(guvenlik) if guvenlik else None,
+        "tablo_sayisi": tablo_sayisi(db_path),
+        "ogrenci_sayisi": ogrenci_sayisi(db_path),
+    }
+
+
+def _veritabani_tablolari(conn):
+    """SQLite sistem tabloları hariç tablo adları."""
+    return {
+        satir[0]
+        for satir in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+            " AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+
+
+def _tablo_satir_sayisi(conn, tablo):
+    """Bir tablodaki satır sayısı (tablo yoksa None)."""
+    try:
+        return int(conn.execute("SELECT COUNT(*) FROM %s" % tablo).fetchone()[0])
+    except sqlite3.Error:
+        return None
+
+
+def yedek_dogrula(yedek_yolu, kaynak_db_path=None) -> dict:
+    """Yedeğin açılabildiğini, bütünlüğünü ve kaynakla eşleşmesini doğrular.
+
+    - Bütünlük: `PRAGMA integrity_check` = `ok`.
+    - Tablo kümesi: yedek, kaynak DB'deki tüm tabloları içeriyor mu?
+    - Öğrenci sayısı: yedek ile kaynak eşit mi?
+
+    Kaynak veritabanı **yalnızca okunur**, değiştirilmez. Gerçek üretim
+    verisini test etmek yerine bu fonksiyon geçici kopyalarla kullanılmalıdır.
+    """
+    yedek = Path(yedek_yolu).expanduser().resolve()
+    if not yedek.exists():
+        raise FileNotFoundError("Yedek dosyası bulunamadı: %s" % yedek)
+
+    y_conn = sqlite3.connect(str(yedek))
+    try:
+        butunluk = str(y_conn.execute("PRAGMA integrity_check").fetchone()[0])
+        y_tablolar = _veritabani_tablolari(y_conn)
+        y_ogrenci = _tablo_satir_sayisi(y_conn, "ogrenciler")
+    finally:
+        y_conn.close()
+
+    sonuc = {
+        "yol": str(yedek),
+        "butunluk": butunluk,
+        "tablo_sayisi": len(y_tablolar),
+        "tablolar": sorted(y_tablolar),
+        "ogrenci_sayisi": y_ogrenci,
+        "eksik_tablolar": [],
+        "kaynak_tablo_sayisi": None,
+        "kaynak_ogrenci_sayisi": None,
+        "tablolar_esit": None,
+        "ogrenci_sayisi_esit": None,
+    }
+
+    if kaynak_db_path is not None:
+        k_conn = sqlite3.connect(db_yolu(kaynak_db_path))
+        try:
+            k_tablolar = _veritabani_tablolari(k_conn)
+            k_ogrenci = _tablo_satir_sayisi(k_conn, "ogrenciler")
+        finally:
+            k_conn.close()
+        eksik = k_tablolar - y_tablolar
+        sonuc["kaynak_tablo_sayisi"] = len(k_tablolar)
+        sonuc["kaynak_ogrenci_sayisi"] = k_ogrenci
+        sonuc["eksik_tablolar"] = sorted(eksik)
+        sonuc["tablolar_esit"] = not eksik
+        sonuc["ogrenci_sayisi_esit"] = k_ogrenci == y_ogrenci
+
+    sonuc["saglikli"] = (
+        butunluk == "ok"
+        and not sonuc["eksik_tablolar"]
+        and sonuc["ogrenci_sayisi_esit"] in (None, True)
+    )
+    return sonuc
 
 
 @st.cache_resource(show_spinner=False)

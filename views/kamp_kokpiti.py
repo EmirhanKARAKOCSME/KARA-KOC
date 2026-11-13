@@ -87,10 +87,52 @@ def _css(tema):
         .kamp-kart {background: rgba(10,12,16,0.86); border:1px solid #b8975a;
             border-radius:16px; padding:20px 24px; margin-top:10px;
             box-shadow:0 0 22px rgba(0,0,0,0.6);}
-        .kamp-sayac {font-size:2.6rem; font-variant-numeric:tabular-nums;
-            color:#E2E8F0; line-height:1.1;}
-        .kamp-mikro {font-size:0.95rem; color:#CBD5E1;}
+        .kamp-sayac {font-size:clamp(2.8rem, 9vw, 5.4rem);
+            font-variant-numeric:tabular-nums; color:#F1F5F9; line-height:1.0;
+            text-align:center; font-weight:700; letter-spacing:0.05em;
+            text-shadow:0 0 30px rgba(148,163,184,0.35);}
+        .kamp-yatay-ipucu {display:none;}
+        /* Portre mobilde küçük ve zarif yönlendirme; yatay/masaüstünde gizli. */
+        @media (orientation: portrait) and (max-width: 768px) {
+            .kamp-yatay-ipucu {display:block; text-align:center; color:#94A3B8;
+                font-size:0.76rem; letter-spacing:0.04em; margin:2px 0 8px 0;}
+        }
+        /* Yatay telefon: dikey boşluğu azalt, metni küçült, butonu koru. */
+        @media (orientation: landscape) and (max-height: 520px) {
+            .block-container {padding-top:0.5rem !important;
+                padding-bottom:0.5rem !important;}
+            .kamp-baslik {margin:0 0 6px 0; gap:10px;}
+            .kamp-baslik .marka {font-size:1.3rem; letter-spacing:0.22em;}
+            .kamp-baslik .rozet {font-size:0.64rem; padding:3px 8px;}
+            .kamp-kart {padding:10px 14px; margin-top:4px; border-radius:12px;}
+            .kamp-merkez {padding:6px 4px 4px 4px;}
+            .kamp-sayac {font-size:clamp(2.2rem, 6.5vw, 3.4rem);}
+            .kamp-sayac-etiket {font-size:0.66rem; margin-bottom:2px;}
+            .kamp-adim {font-size:0.8rem; margin:2px 0;}
+            .kamp-dilim {font-size:0.72rem;}
+            .stButton > button, .stDownloadButton > button {min-height:42px;}
+            .stTabs [data-baseweb="tab-list"] {flex-wrap:nowrap;
+                overflow-x:auto; -webkit-overflow-scrolling:touch;}
+            h4 {font-size:0.95rem; margin:2px 0 4px 0;}
+        }
+        .kamp-sayac-etiket {text-align:center; color:#94A3B8; font-size:0.78rem;
+            letter-spacing:0.26em; margin-bottom:8px;}
+        .kamp-merkez {display:flex; flex-direction:column; align-items:center;
+            justify-content:center; padding:26px 8px 14px 8px;}
+        .kamp-mikro {font-size:0.98rem; color:#CBD5E1;}
         .kamp-dilim {color:#94A3B8; font-size:0.8rem; letter-spacing:0.06em;}
+        .kamp-gorev-tur {display:inline-block; margin-top:8px; padding:3px 12px;
+            border-radius:999px; border:1px solid #b8975a; color:#E7C98B;
+            font-size:0.74rem; letter-spacing:0.09em; text-transform:uppercase;}
+        .kamp-adim {color:#CBD5E1; font-size:0.92rem; margin:5px 0;
+            padding-left:14px; border-left:2px solid rgba(184,151,90,0.55);}
+        /* Tema ile bütünleşik giriş alanları (beyaz kutular azaltıldı). */
+        .stSelectbox div[data-baseweb="select"] > div,
+        .stNumberInput input {
+            background-color:#0E1520 !important; color:#E2E8F0 !important;
+            border-color:#334155 !important;
+        }
+        .stSelectbox label, .stNumberInput label {color:#CBD5E1 !important;}
         </style>
         """
     return (
@@ -106,9 +148,21 @@ def _sayac(kayit_id):
         return
     gecen = int(max(0, time.time() - float(kayit["baslangic_ts"])))
     st.markdown(
-        f'<div class="kamp-sayac">{gecen // 60:02d}:{gecen % 60:02d}</div>',
+        '<div class="kamp-merkez">'
+        '<div class="kamp-sayac-etiket">ÇALIŞMA SÜRESİ</div>'
+        f'<div class="kamp-sayac">{gecen // 60:02d}:{gecen % 60:02d}</div>'
+        '</div>',
         unsafe_allow_html=True,
     )
+
+
+def _temizle_gorev_durumu():
+    """Aktif görev oturum durumunu sıfırlar (yeni kart için)."""
+    st.session_state["kamp_kayit_id"] = None
+    st.session_state["kamp_kayit_anahtar"] = None
+    st.session_state["kamp_sonuc_bekliyor"] = False
+    st.session_state["kamp_yanlis"] = 0
+    st.session_state["kamp_bos"] = 0
 
 
 if hasattr(st, "fragment"):
@@ -192,24 +246,7 @@ def render(ctx):
     tema = st.session_state.get("kamp_tema") or kamp_motoru.VARSAYILAN_TEMA
     st.markdown(_css(tema), unsafe_allow_html=True)
 
-    # --- Başlık + tema + çıkış -----------------------------------------
-    ust1, ust2 = st.columns([5, 1])
-    with ust1:
-        st.markdown(
-            '<div class="kamp-baslik"><span class="marka">KARAKOÇ</span>'
-            '<span class="rozet">YKS KAMP</span></div>',
-            unsafe_allow_html=True,
-        )
-    with ust2:
-        tema = _tema_secici()
-        if st.button("Çıkış", key="kamp_cikis"):
-            st.session_state["kamp_aktif"] = False
-            st.rerun()
-
-    if not _protokol_karti():
-        return
-
-    # --- Branş seçici ---------------------------------------------------
+    # --- Kamp havuzu / branş listesi (ayarlar panelinde kullanılır) -----
     sinif = ctx.user.get("sinif_seviyesi")
     alan = ctx.user.get("hedef_alan")
     try:
@@ -222,19 +259,101 @@ def render(ctx):
         return
     if st.session_state.get("kamp_ders") not in dersler:
         st.session_state["kamp_ders"] = dersler[0]
-    secilen_ders = st.selectbox(
-        "Branş", dersler,
-        index=dersler.index(st.session_state["kamp_ders"]),
-        key="kamp_ders_sec",
+
+    # --- Üst bölüm: sade başlık + sağ üstte AYARLAR paneli -------------
+    # Tema, branş, çıkış, kampı bitir ve "Yoruldum" artık ana ekranı
+    # kaplamaz; yalnızca ayarlar panelinden erişilir.
+    ust1, ust2 = st.columns([6, 1])
+    with ust1:
+        st.markdown(
+            '<div class="kamp-baslik"><span class="marka">KARA KOÇ</span>'
+            '<span class="rozet">YKS KAMP</span></div>',
+            unsafe_allow_html=True,
+        )
+    with ust2:
+        with st.popover("⚙️", help="Kamp ayarları"):
+            _tema_secici()
+            _sec = st.selectbox(
+                "Branş", dersler,
+                index=dersler.index(st.session_state["kamp_ders"]),
+                key="kamp_ders_sec",
+            )
+            if _sec != st.session_state["kamp_ders"]:
+                st.session_state["kamp_ders"] = _sec
+                st.session_state["kamp_mikro_idx"] = 0
+                st.session_state["kamp_dilim_idx"] = 0
+                _temizle_gorev_durumu()
+                st.rerun()
+            st.markdown("---")
+            if st.button("😴 Yoruldum", key="kamp_yoruldum_panel"):
+                st.session_state["kamp_yoruldum_goster"] = True
+                st.rerun()
+            if st.button("Çıkış", key="kamp_cikis"):
+                st.session_state["kamp_aktif"] = False
+                st.rerun()
+            if st.button("Kampı Bitir", key="kamp_bitir_panel"):
+                if oturum_id:
+                    st.session_state["kamp_ozet"] = kamp_motoru.oturum_bitir(
+                        oturum_id, kamp_motoru.DURUM_BOZUK
+                    )
+                st.session_state["kamp_aktif"] = False
+                st.session_state["kamp_oturum_id"] = None
+                st.rerun()
+
+    secilen_ders = st.session_state["kamp_ders"]
+
+    # Yatay kullanım önerisi (yalnızca portre mobilde görünür; yön zorlanmaz).
+    st.markdown(
+        '<div class="kamp-yatay-ipucu">📱 En iyi deneyim için telefonunu '
+        "yatay kullan.</div>",
+        unsafe_allow_html=True,
     )
-    if secilen_ders != st.session_state["kamp_ders"]:
-        st.session_state["kamp_ders"] = secilen_ders
-        st.session_state["kamp_mikro_idx"] = 0
-        st.session_state["kamp_dilim_idx"] = 0
-        st.session_state["kamp_kayit_id"] = None
-        st.session_state["kamp_kayit_anahtar"] = None
-        # Kullanıcı talimatı: branş değişiminde kart ANINDA güncellensin.
-        st.rerun()
+
+    if not _protokol_karti():
+        return
+
+    # --- 24 saatlik telafi (varsa) — yeni konudan ÖNCE ------------------
+    # Aralıklı tekrar mantığı bozulmaz: telafi bir TEKRAR görevidir, soru
+    # sonucu istenmez; yalnızca özet not okuma adımı sunulur.
+    if not st.session_state.get("kamp_telafi_tamam"):
+        try:
+            _telafiler = kamp_motoru.son_24s_telafi(ctx.user["id"], secilen_ders)
+        except Exception:  # noqa: BLE001
+            _telafiler = []
+        if _telafiler:
+            _t = _telafiler[0]
+            st.markdown(
+                f'<div class="kamp-kart"><div class="kamp-dilim">TELAFİ</div>'
+                f'<div class="kamp-mikro">{_t.get("ders") or secilen_ders} ➔ '
+                f'{_t.get("mikro_konu") or ""}</div>'
+                '<div class="kamp-gorev-tur">TEKRAR GÖREVİ</div></div>',
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Bu tekrar görevinde soru sonucu istenmez; özet notlarını "
+                "gözden geçir ve devam et."
+            )
+            if st.button(
+                "Tekrarı Tamamla", type="primary", key="kamp_telafi_tamamla"
+            ):
+                _plan_t = kamp_motoru.tekrar_gorev_plani(
+                    _t.get("ders") or secilen_ders,
+                    _t.get("makro_unite") or "",
+                    _t.get("mikro_konu") or "",
+                )
+                _kayit_t = kamp_motoru.mikro_gorev_baslat(
+                    oturum_id, ctx.user["id"], _t.get("ders") or secilen_ders,
+                    _t.get("makro_unite") or "", _t.get("mikro_konu") or "",
+                    _t.get("mikro_konu") or "", 1,
+                    pedagoji_turu=_plan_t["pedagoji_turu"],
+                    gorev_turu=_plan_t["gorev_turu"],
+                    adimlar=_plan_t["adimlar"], soru_gerekli=0,
+                )
+                if _kayit_t:
+                    kamp_motoru.mikro_gorev_tamamla(_kayit_t["id"])
+                st.session_state["kamp_telafi_tamam"] = True
+                st.rerun()
+            return
 
     bilinen, biten = _veri_yukle(ctx)
     try:
@@ -294,83 +413,143 @@ def render(ctx):
             st.rerun()
         return
 
-    # --- Aktif görev kartı ---------------------------------------------
+    # --- Pedagojik görev planı (tür + çalışma adımları) ----------------
+    plan = kamp_motoru.gorev_plani_uret(
+        secilen_ders, kilit["makro_unite"], aktif_mikro, dilim["hedef_soru"]
+    )
     anahtar = (secilen_ders, aktif_mikro, dilim["dilim_no"])
     if st.session_state.get("kamp_kayit_anahtar") != anahtar:
         kayit = kamp_motoru.mikro_gorev_baslat(
             oturum_id, ctx.user["id"], secilen_ders, kilit["makro_unite"],
             aktif_mikro, aktif_mikro, dilim["hedef_soru"],
             dilim_no=dilim["dilim_no"], toplam_dilim=dilim["toplam_dilim"],
+            pedagoji_turu=plan["pedagoji_turu"], gorev_turu=plan["gorev_turu"],
+            adimlar=plan["adimlar"], soru_gerekli=plan["soru_gerekli"],
         )
         st.session_state["kamp_kayit_id"] = kayit["id"] if kayit else None
         st.session_state["kamp_kayit_anahtar"] = anahtar
-        st.session_state["kamp_yanlis"] = 0
-        st.session_state["kamp_bos"] = 0
+        st.session_state["kamp_sonuc_bekliyor"] = False
 
     kayit_id = st.session_state.get("kamp_kayit_id")
+
+    # --- Görev kartı (ders / makro / mikro / tür / bölüm / hedef) ------
+    gorev_etiketi = (
+        "KONU ÖĞRENME + PEKİŞTİRME"
+        if plan["pedagoji_turu"] != "Ezber"
+        else "KONU ÖĞRENME + EZBER"
+    )
+    soru_satiri = (
+        f'<div class="kamp-dilim">{int(dilim["hedef_soru"])} SORU</div>'
+        if plan["soru_gerekli"] else ""
+    )
     st.markdown(
-        f'<div class="kamp-kart"><div class="kamp-dilim">BÖLÜM '
-        f'{dilim["dilim_no"]}/{dilim["toplam_dilim"]}</div>'
-        f'<div class="kamp-mikro"><b>{kilit["makro_unite"]}</b> ➔ {aktif_mikro}</div></div>',
+        '<div class="kamp-dilim" style="margin-top:8px;">BÖLÜM '
+        f'{dilim["dilim_no"]} / {dilim["toplam_dilim"]}</div>',
         unsafe_allow_html=True,
     )
+    st.markdown(
+        f'<div class="kamp-kart"><div class="kamp-dilim">{secilen_ders.upper()}</div>'
+        f'<div class="kamp-mikro"><b>{kilit["makro_unite"]}</b> ➔ {aktif_mikro}</div>'
+        f'<div class="kamp-gorev-tur">GÖREV: {gorev_etiketi}</div>'
+        f'{soru_satiri}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # --- Bu görevde ne yapılacak? (çalışma adımları) -------------------
+    st.markdown("#### 📋 Bu görevde ne yapacaksın?")
+    for _adim in plan["adimlar"]:
+        _hedef = int(_adim.get("hedef_soru") or 0)
+        _ek = (" — %d soru" % _hedef) if _hedef else ""
+        st.markdown(
+            f'<div class="kamp-adim">{_adim.get("baslik", "")}{_ek}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # --- Merkezî büyük kronometre --------------------------------------
     if kayit_id:
         _sayac_akisi(kayit_id)
 
+    # --- Tamamla / sonuç akışı -----------------------------------------
     hedef = int(dilim["hedef_soru"])
-    c1, c2 = st.columns(2)
-    with c1:
-        yanlis = st.number_input(
-            "Yanlış", min_value=0, max_value=hedef,
-            value=int(st.session_state.get("kamp_yanlis", 0)), step=1,
-            key="kamp_yanlis_in",
-        )
-    with c2:
-        bos = st.number_input(
-            "Boş", min_value=0, max_value=hedef,
-            value=int(st.session_state.get("kamp_bos", 0)), step=1,
-            key="kamp_bos_in",
-        )
+    soru_gerekli = bool(plan["soru_gerekli"])
 
-    if st.button("Tamamla ve Sonrakine Geç", type="primary", key="kamp_tamamla"):
-        try:
-            sonuc = kamp_motoru.mikro_gorev_tamamla(kayit_id, yanlis, bos)
-        except Exception as hata:  # noqa: BLE001
-            set_flash_message("error", f"Kamp kaydı tamamlanamadı: {hata}")
-            st.rerun()
-        st.session_state["kamp_kayit_id"] = None
-        st.session_state["kamp_kayit_anahtar"] = None
-        st.session_state["kamp_yanlis"] = 0
-        st.session_state["kamp_bos"] = 0
-        if sonuc.get("analiz_gerekli"):
-            st.session_state["kamp_analiz"] = sonuc
-        else:
-            _ilerle()
-        # Kullanıcı talimatı: makro ünite barı ve arka plan ANINDA güncellensin.
-        st.rerun()
-
-    # --- Yorgunluk merdiveni -------------------------------------------
-    with st.expander("😴 Yoruldum"):
-        oneri = kamp_motoru.yorgunluk_onerisi(secilen_ders)
-        st.markdown("**Öneri:** " + oneri["mesaj"])
-        for kademe in kamp_motoru.yorgunluk_kademeleri():
-            st.markdown(
-                f'- **{kademe["kademe"]}. {kademe["baslik"]}** — {kademe["mesaj"]}'
-            )
-        if oneri.get("tur") == "sozel" and oneri.get("oneri") in dersler:
-            if st.button(f'Sözel derse geç ({oneri["oneri"]})', key="kamp_sozel_gec"):
-                st.session_state["kamp_ders"] = oneri["oneri"]
-                st.session_state["kamp_mikro_idx"] = 0
-                st.session_state["kamp_dilim_idx"] = 0
-                st.session_state["kamp_kayit_id"] = None
-                st.session_state["kamp_kayit_anahtar"] = None
+    if not soru_gerekli:
+        # Soru gerektirmeyen görev: sonuç formu AÇILMAZ.
+        if st.button("Tamamla ve Sonrakine Geç", type="primary", key="kamp_tamamla"):
+            try:
+                kamp_motoru.mikro_gorev_tamamla(kayit_id)
+            except Exception as hata:  # noqa: BLE001
+                set_flash_message("error", f"Kamp kaydı tamamlanamadı: {hata}")
                 st.rerun()
-        if st.button("Kampı Kesinlikle Bitir", key="kamp_bitir"):
-            ozet = kamp_motoru.oturum_bitir(oturum_id, kamp_motoru.DURUM_BOZUK)
-            st.session_state["kamp_ozet"] = ozet
-            st.session_state["kamp_aktif"] = False
-            st.session_state["kamp_oturum_id"] = None
+            _temizle_gorev_durumu()
+            _ilerle()
             st.rerun()
+    elif not st.session_state.get("kamp_sonuc_bekliyor"):
+        # Aktif çalışma ekranında yanlış/boş alanları GÖSTERİLMEZ.
+        if st.button("Tamamla ve Sonrakine Geç", type="primary", key="kamp_tamamla"):
+            st.session_state["kamp_sonuc_bekliyor"] = True
+            st.rerun()
+    else:
+        st.markdown("### ✅ Sonuç Girişi")
+        c1, c2 = st.columns(2)
+        with c1:
+            yanlis = st.number_input(
+                "Yanlış", min_value=0, max_value=hedef, value=0, step=1,
+                key="kamp_yanlis_in",
+            )
+        with c2:
+            bos = st.number_input(
+                "Boş", min_value=0, max_value=hedef, value=0, step=1,
+                key="kamp_bos_in",
+            )
+        if int(yanlis) + int(bos) > hedef:
+            st.error(
+                "Yanlış + boş toplamı hedef soru sayısını (%d) aşamaz." % hedef
+            )
+        else:
+            dogru = max(0, hedef - int(yanlis) - int(bos))
+            oran = (dogru / float(hedef) * 100.0) if hedef else 0.0
+            st.caption(
+                "Doğru: %d · Başarı: %%%.1f · Eşik: %%75" % (dogru, oran)
+            )
+            if st.button(
+                "Sonucu Kaydet ve Devam Et", type="primary", key="kamp_sonuc_kaydet"
+            ):
+                try:
+                    sonuc = kamp_motoru.mikro_gorev_tamamla(
+                        kayit_id, int(yanlis), int(bos)
+                    )
+                except Exception as hata:  # noqa: BLE001
+                    set_flash_message("error", f"Kamp kaydı tamamlanamadı: {hata}")
+                    st.rerun()
+                _temizle_gorev_durumu()
+                if sonuc.get("analiz_gerekli"):
+                    st.session_state["kamp_analiz"] = sonuc
+                else:
+                    _ilerle()
+                st.rerun()
+
+    # --- Yorgunluk merdiveni (yalnızca ayarlar panelinden açılır) ------
+    if st.session_state.get("kamp_yoruldum_goster"):
+        with st.expander("😴 Yoruldum — öneri", expanded=True):
+            oneri = kamp_motoru.yorgunluk_onerisi(secilen_ders)
+            st.markdown("**Öneri:** " + oneri["mesaj"])
+            for kademe in kamp_motoru.yorgunluk_kademeleri():
+                st.markdown(
+                    f'- **{kademe["kademe"]}. {kademe["baslik"]}** — {kademe["mesaj"]}'
+                )
+            if oneri.get("tur") == "sozel" and oneri.get("oneri") in dersler:
+                if st.button(
+                    f'Sözel derse geç ({oneri["oneri"]})', key="kamp_sozel_gec"
+                ):
+                    st.session_state["kamp_ders"] = oneri["oneri"]
+                    st.session_state["kamp_mikro_idx"] = 0
+                    st.session_state["kamp_dilim_idx"] = 0
+                    _temizle_gorev_durumu()
+                    st.rerun()
+            if st.button("Kapat", key="kamp_yoruldum_kapat"):
+                st.session_state["kamp_yoruldum_goster"] = False
+                st.rerun()
 
     # --- Çıkışta özet fişi (varsa) -------------------------------------
     ozet = st.session_state.get("kamp_ozet")

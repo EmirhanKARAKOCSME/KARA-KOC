@@ -11,6 +11,7 @@ Katmanlar:
 - DB: `init_db`, `oturum_baslat`, `mikro_gorev_baslat`, `mikro_gorev_tamamla`,
   `oturum_bitir`, `son_24s_telafi` (yalnızca `_baglanti` üzerinden okuma/yazma).
 """
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -191,12 +192,41 @@ CREATE TABLE IF NOT EXISTS kamp_mikro_kayitlari (
 """
 
 
+# v2.5: pedagojik görev bilgisi. EKLEMELİ migrasyon: eski satırlar korunur,
+# yalnızca eksik kolonlar eklenir (idempotent).
+_EK_KOLONLAR = (
+    ("pedagoji_turu", "TEXT"),
+    ("gorev_turu", "TEXT"),
+    ("adimlar_json", "TEXT"),
+    ("soru_gerekli", "INTEGER NOT NULL DEFAULT 1"),
+)
+
+
+def _tablo_kolonlari(conn, tablo):
+    """Bir tablodaki kolon adları (tablo yoksa boş küme)."""
+    try:
+        return {satir[1] for satir in conn.execute("PRAGMA table_info(%s)" % tablo)}
+    except sqlite3.Error:
+        return set()
+
+
 def init_db():
-    """Kamp tablolarını (yoksa) oluşturur (CREATE TABLE IF NOT EXISTS)."""
+    """Kamp tablolarını oluşturur ve yeni kolonları ekler (idempotent).
+
+    Eski `kamp_mikro_kayitlari` satırları silinmez; pedagojik bilgi kolonları
+    yoksa `ALTER TABLE ... ADD COLUMN` ile eklenir.
+    """
     with _baglanti() as conn:
         with _islem(conn):
             conn.execute(_SEMA_OTURUM)
             conn.execute(_SEMA_MIKRO)
+            mevcut = _tablo_kolonlari(conn, "kamp_mikro_kayitlari")
+            for ad, tip in _EK_KOLONLAR:
+                if ad not in mevcut:
+                    conn.execute(
+                        "ALTER TABLE kamp_mikro_kayitlari ADD COLUMN %s %s"
+                        % (ad, tip)
+                    )
     return True
 
 
@@ -385,27 +415,100 @@ def oturum_baslat(ogrenci_id, tema=None, an=None):
     return oturum_getir(oturum_id)
 
 
+def gorev_plani_uret(ders, makro_unite, mikro_konu, hedef_soru):
+    """Kamp mikro görevi için pedagojik çalışma planı üretir.
+
+    Kamp mikro görevleri **ilk kez çalışılan** konulardır. Mevcut
+    `task_steps.adimlari_uret` kullanılır; yeni bir sınıflandırma yazılmaz.
+
+    - Ezber dersleri: konu anlatımı + kısa not + aktif hatırlama + düşük soru.
+    - Pekiştirme dersleri: konu anlatımı + kısa not + kolay→orta→zor soru.
+
+    Dönen sözlük: `pedagoji_turu`, `gorev_turu`, `adimlar`, `soru_gerekli`,
+    `hedef_soru`.
+    """
+    from data.pedagogy import get_konu_pedagoji_turu
+    from services import task_steps
+
+    pedagoji = get_konu_pedagoji_turu(ders)
+    hedef = max(0, int(hedef_soru or 0))
+    gorev = {
+        "ders": ders,
+        "makro_konu": makro_unite,
+        "mikro_konu": mikro_konu,
+        "hedef_soru": hedef,
+        "pedagoji_turu": pedagoji,
+        # Ezber: zorunlu konu anlatımı + kavram; Pekiştirme: standart öğrenme.
+        "gorev_turu": "konu_anlatimi" if pedagoji == "Ezber" else "anlatim",
+    }
+    try:
+        adimlar = task_steps.adimlari_uret(gorev)
+    except Exception:  # noqa: BLE001 - plan üretilemezse temel adım
+        adimlar = [{"baslik": "Konuyu çalış.", "adim_turu": "genel", "hedef_soru": 0}]
+    soru_gerekli = 1 if any(a.get("adim_turu") == "soru" for a in adimlar) else 0
+    return {
+        "pedagoji_turu": pedagoji,
+        "gorev_turu": "konu_ogrenme",
+        "adimlar": adimlar,
+        "soru_gerekli": soru_gerekli,
+        "hedef_soru": hedef,
+    }
+
+
+def tekrar_gorev_plani(ders, makro_unite, mikro_konu):
+    """Soru gerektirmeyen tekrar/telafi görevi planı.
+
+    Tekrar görevi soru çözme görevi değildir; öğrenciden yanlış/boş sayısı
+    istenmez. Mevcut aralıklı tekrar mantığını bozmadan yalnızca not okuma
+    adımı sunulur.
+    """
+    return {
+        "pedagoji_turu": "Tekrar",
+        "gorev_turu": "tekrar",
+        "adimlar": [
+            {
+                "baslik": "Özet notlarını oku ve gözden geçir.",
+                "adim_turu": "tekrar",
+                "hedef_soru": 0,
+            }
+        ],
+        "soru_gerekli": 0,
+        "hedef_soru": 0,
+    }
+
+
 def mikro_gorev_baslat(oturum_id, ogrenci_id, ders, makro_unite, ana_konu,
-                       mikro_konu, hedef_soru, dilim_no=1, toplam_dilim=1):
+                       mikro_konu, hedef_soru, dilim_no=1, toplam_dilim=1,
+                       pedagoji_turu=None, gorev_turu=None, adimlar=None,
+                       soru_gerekli=1):
     """Aktif mikro görevi başlatır ve `baslangic_ts = time.time()` damgalar.
 
     Sayfa yenilense/mobil uykuya girse de geçen süre `time.time()-baslangic_ts`
-    ile kayıpsız hesaplanır.
+    ile kayıpsız hesaplanır. Pedagojik görev bilgisi (tür, adımlar, soru
+    gerekip gerekmediği) kayıtla birlikte saklanır.
     """
     hedef = max(1, int(hedef_soru or 0))
     ts = unix_ts()
+    adimlar_json = None
+    if adimlar:
+        try:
+            adimlar_json = json.dumps(adimlar, ensure_ascii=False)
+        except (TypeError, ValueError):
+            adimlar_json = None
     with _baglanti() as conn:
         with _islem(conn):
             imlec = conn.execute(
                 "INSERT INTO kamp_mikro_kayitlari (oturum_id, ogrenci_id, ders,"
                 " makro_unite, ana_konu, mikro_konu, dilim_no, toplam_dilim,"
-                " hedef_soru, baslangic_ts, durum)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " hedef_soru, pedagoji_turu, gorev_turu, adimlar_json,"
+                " soru_gerekli, baslangic_ts, durum)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     int(oturum_id), int(ogrenci_id), _metin(ders),
                     _metin(makro_unite), _metin(ana_konu), _metin(mikro_konu),
-                    int(dilim_no or 1), int(toplam_dilim or 1), hedef, ts,
-                    DURUM_AKTIF,
+                    int(dilim_no or 1), int(toplam_dilim or 1), hedef,
+                    _metin(pedagoji_turu), _metin(gorev_turu), adimlar_json,
+                    1 if soru_gerekli else 0, ts, DURUM_AKTIF,
                 ),
             )
             kayit_id = imlec.lastrowid
@@ -421,9 +524,43 @@ def mikro_gorev_tamamla(kayit_id, yanlis_sayisi=0, bos_sayisi=0):
     kayit = _kayit_getir(kayit_id)
     if not kayit:
         raise KampHatasi("Kamp mikro kaydı bulunamadı.")
+    # Mükerrer tamamlama koruması: sayfa yenilemesi / çift tıklama aynı
+    # kaydı ikinci kez işlemez (toplamlar şişmez).
+    if (kayit.get("durum") or DURUM_AKTIF) != DURUM_AKTIF:
+        sonuc = dict(kayit)
+        oran_onceki = float(kayit.get("basari_orani") or 0)
+        sonuc["analiz_gerekli"] = oran_onceki < BASARI_ESIGI
+        sonuc["sonraki"] = sonraki_adim(oran_onceki)
+        sonuc["mukerrer"] = True
+        return sonuc
     ts = unix_ts()
     baslangic = float(kayit.get("baslangic_ts") or ts)
     gecen = int(max(0, ts - baslangic))
+
+    # Soru gerektirmeyen görev (konu/not/tekrar): başarı %100, soru toplamı
+    # değişmez; öğrenciden yanlış/boş girişi istenmez. Kolon yoksa (eski kayıt)
+    # varsayılan "soru gerekli" kabul edilir.
+    _soru_gerekli = kayit.get("soru_gerekli")
+    if _soru_gerekli is not None and int(_soru_gerekli) == 0:
+        with _baglanti() as conn:
+            with _islem(conn):
+                conn.execute(
+                    "UPDATE kamp_mikro_kayitlari SET yanlis_sayisi = 0,"
+                    " bos_sayisi = 0, basari_orani = 100, bitis_ts = ?,"
+                    " gecen_sure_sn = ?, durum = ? WHERE id = ?",
+                    (ts, gecen, DURUM_TAMAM, int(kayit_id)),
+                )
+                conn.execute(
+                    "UPDATE kamp_oturumlari SET toplam_sure_sn = toplam_sure_sn + ?,"
+                    " tamamlanan_mikro_sayisi = tamamlanan_mikro_sayisi + 1"
+                    " WHERE id = ?",
+                    (gecen, int(kayit.get("oturum_id") or 0)),
+                )
+        sonuc = _kayit_getir(kayit_id)
+        sonuc["analiz_gerekli"] = False
+        sonuc["sonraki"] = "mikro"
+        return sonuc
+
     hedef = int(kayit.get("hedef_soru") or 0)
     yanlis = max(0, int(yanlis_sayisi or 0))
     bos = max(0, int(bos_sayisi or 0))

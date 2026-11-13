@@ -1,4 +1,4 @@
-"""FAZ 5C/5D - Gerçek ilerlemeye dayalı akıllı haftalık program motoru.
+""" Gerçek ilerlemeye dayalı akıllı haftalık program motoru.
 
 İlkeler:
 

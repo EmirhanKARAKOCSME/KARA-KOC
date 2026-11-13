@@ -33,7 +33,9 @@ from views.shared import (
 
 def render(ctx):
     st.header("📅 Haftalık Çalışma Programı Motoru")
-    col_p1, col_p2 = st.columns([1.35, 1])
+    # v2.5: iki sütunlu dar düzen yerine tam genişlik. Sağdaki simülatör
+    # bilgilendirme kartı kaldırıldı (simülatör kendi sekmesinde).
+    col_p1 = st.container()
 
     with col_p1:
         st.subheader("⚙️ Program Oluşturma Ayarları")
@@ -297,19 +299,6 @@ def render(ctx):
                 if uyarilar:
                     set_flash_message("warning", uyari_metni.strip())
                 st.rerun()
-
-    with col_p2:
-        st.subheader("🎯 YKS Puan ve Sıralama Simülatörü")
-        st.info(
-            "Simülatör kendi sekmesine taşındı: **🎯 YKS Simülatörü**.\n\n"
-            "Orada son denemelerinizden veya manuel girişten netlerinizi\n"
-            "kullanarak model puanınızı, hedef net karşılaştırmanızı ve\n"
-            "(doğrulanmış veri varsa) sıralama tahmininizi görebilirsiniz."
-        )
-        st.caption(
-            "Eski sürümdeki sabit sıralama tabloları kaldırıldı: kaynağı\n"
-            "doğrulanmamış sıralama sayıları gösterilmiyor."
-        )
 
     st.markdown("---")
     _onceki_programlar_bolumu(ctx.user["id"])

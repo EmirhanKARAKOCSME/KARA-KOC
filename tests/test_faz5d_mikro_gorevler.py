@@ -226,18 +226,35 @@ class MikroGorevTestleri(unittest.TestCase):
             if alts:
                 self.assertIn(alt, alts)
 
-        # Alt başlık listesi olmayan konular (9. sınıf Maarif müfredatı) yine
-        # de tek görev olarak planlanır; hiçbir konu sessizce düşmez.
-        sonuc = self._plan(mode="maarif9", bilinen_mikro=set())
-        alt_siz = [
-            g for g in sonuc["gorevler"]
-            if g["ders"] != "TYT Türkçe"
-            and not self.mikro_alt.get(g["mikro_konu"])
-        ]
-        self.assertTrue(alt_siz, "Alt başlığı olmayan konular planlanmalı")
-        for gorev in alt_siz:
-            self.assertIsNone(gorev["alt_konu"])
-            self.assertGreater(gorev["hedef_soru"], 0)
+        # Alt başlık listesi olmayan bir konu, mikro görev ayrımında TEK görev
+        # olarak kalmalı ve sessizce düşmemeli. v2.5: mikro konu kataloğu
+        # tamamlandığı için bu senaryoyu bir konunun alt listesini kaldırarak
+        # doğrudan (zamanlayıcıdan bağımsız) doğruluyoruz.
+        alt_haritasi = V.mikro_alt_konular()
+        ornek_konu = None
+        makro = None
+        for _unite, _mikrolar in V.mufredat("maarif9")["Matematik ve Veri"].items():
+            for _m in _mikrolar:
+                if _m in alt_haritasi:
+                    ornek_konu, makro = _m, _unite
+                    break
+            if ornek_konu:
+                break
+        self.assertIsNotNone(ornek_konu, "Maarif 9 müfredatında konu bulunmalı")
+        alt_haritasi.pop(ornek_konu, None)
+        gorev = {
+            "ders": "Matematik ve Veri",
+            "makro_konu": makro,
+            "mikro_konu": ornek_konu,
+            "hedef_soru": 15,
+            "pedagoji_turu": "Pekiştirme",
+        }
+        ayrilan = planner.mikro_gorevlere_ayir(
+            gorev, alt_haritasi, self.uzay["KONU_SURELERI_DK"]
+        )
+        self.assertEqual(len(ayrilan), 1, "Alt başlıksız konu tek görev olmalı")
+        self.assertIsNone(ayrilan[0].get("alt_konu"))
+        self.assertGreater(int(ayrilan[0]["hedef_soru"]), 0)
 
     # ------------------------------------------------------------------
     # 03 - CHECKLIST'LER BAĞIMSIZ
