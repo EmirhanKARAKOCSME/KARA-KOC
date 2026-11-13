@@ -167,9 +167,13 @@ def veritabani_yedek_geri_yukle(yonetici_id):
         butunluk_kontrol,
         geri_yukle,
         ogrenci_sayisi,
+        son_yedek_bilgisi,
         tablo_sayisi,
         yedek_al,
         yedek_dogrula,
+        yedek_listesi,
+        yedekten_gecici_dogrula,
+        zaman_damgali_yedek,
     )
     from config.settings import veritabani_kalicilik_durumu
 
@@ -190,34 +194,100 @@ def veritabani_yedek_geri_yukle(yonetici_id):
             % (durum["yol"], durum["kaynak"])
         )
 
+    # --- 0) Son yedek bilgisi ---------------------------------------------
+    try:
+        son = son_yedek_bilgisi()
+    except Exception:  # noqa: BLE001
+        son = None
+    if son:
+        st.caption(
+            "🗓️ **Son yedek:** %s · %.1f KB · `%s`"
+            % (son.get("tarih"), (son.get("boyut") or 0) / 1024.0,
+               son.get("dosya_adi"))
+        )
+    else:
+        st.warning(
+            "Henüz uygulama tarafından üretilmiş zaman damgalı yedek yok. "
+            "Aşağıdan ilk yedeği oluşturun."
+        )
+
     # --- 1) Tutarlı yedek al ve indir -------------------------------------
     if st.button("🗄️ Tutarlı yedek oluştur (Backup API)", key="db_yedek_olustur"):
         try:
-            yedek_klasoru = Path(durum["yol"]).parent / "KARA_KOC_YEDEK"
-            dosya_adi = "karakoc_yks_yedek_%s.db" % get_tr_now().strftime(
-                "%Y%m%d_%H%M%S"
+            bilgi = zaman_damgali_yedek(db_path=durum["yol"])
+            st.session_state["admin_yedek_yolu"] = bilgi["yol"]
+            log_islem(
+                yonetici_id,
+                "DB_BACKUP",
+                "Yedek: %s · %d bayt · bütünlük=%s · tablo=%s · öğrenci=%s"
+                % (
+                    bilgi["dosya_adi"], bilgi["boyut"], bilgi["butunluk"],
+                    bilgi["tablo_sayisi"], bilgi["ogrenci_sayisi"],
+                ),
             )
-            hedef = yedek_al(yedek_klasoru / dosya_adi)
-            st.session_state["admin_yedek_yolu"] = hedef
-            dogrulama = yedek_dogrula(hedef, kaynak_db_path=durum["yol"])
-            if dogrulama["saglikli"]:
+            if bilgi["saglikli"]:
                 st.success(
                     "Yedek oluşturuldu ve doğrulandı: `%s` · Bütünlük: %s ·"
-                    " %d tablo · %d öğrenci"
+                    " %s tablo · %s öğrenci"
                     % (
-                        hedef,
-                        dogrulama["butunluk"],
-                        dogrulama["tablo_sayisi"],
-                        dogrulama["ogrenci_sayisi"],
+                        bilgi["yol"],
+                        bilgi["butunluk"],
+                        bilgi["tablo_sayisi"],
+                        bilgi["ogrenci_sayisi"],
                     )
                 )
             else:
                 st.warning(
                     "Yedek oluşturuldu ancak doğrulama uyarı verdi: %s"
-                    % dogrulama
+                    % bilgi["dogrulama"]
                 )
         except Exception as hata:  # noqa: BLE001
             st.error("Yedek oluşturulamadı: %s" % hata)
+
+    # --- 1b) Yedek listesi ve geri yüklenebilirlik kanıtı -----------------
+    try:
+        yedekler = yedek_listesi()
+    except Exception:  # noqa: BLE001
+        yedekler = []
+    if yedekler:
+        with st.expander("📂 Yedek arşivi (%d dosya)" % len(yedekler)):
+            st.dataframe(
+                [
+                    {
+                        "Dosya": y["dosya_adi"],
+                        "Tarih": y["tarih"],
+                        "Boyut (KB)": round((y["boyut"] or 0) / 1024.0, 1),
+                    }
+                    for y in yedekler
+                ],
+                hide_index=True,
+            )
+            secilen_yedek = st.selectbox(
+                "Doğrulanacak yedek",
+                [y["yol"] for y in yedekler],
+                format_func=lambda p: Path(p).name,
+                key="db_yedek_arsiv_secim",
+            )
+            if st.button("🧪 Geçici kopyada geri yükleme testi", key="db_yedek_test_restore"):
+                try:
+                    test = yedekten_gecici_dogrula(
+                        secilen_yedek, kaynak_db_path=durum["yol"]
+                    )
+                except Exception as hata:  # noqa: BLE001
+                    st.error("Geri yükleme testi başarısız: %s" % hata)
+                else:
+                    if test.get("geri_yuklenebilir"):
+                        st.success(
+                            "✅ Yedek geçici kopyaya başarıyla açıldı: bütünlük=%s"
+                            " · %s tablo · %s öğrenci"
+                            % (
+                                test.get("butunluk"),
+                                test.get("tablo_sayisi"),
+                                test.get("ogrenci_sayisi"),
+                            )
+                        )
+                    else:
+                        st.error("Yedek geri yüklenebilir değil: %s" % test)
 
     yedek_yolu = st.session_state.get("admin_yedek_yolu")
     if yedek_yolu and Path(yedek_yolu).exists():

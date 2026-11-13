@@ -23,15 +23,21 @@
 ## Admin panelinden yedek alma (adım adım)
 
 1. Yönetici hesabıyla giriş yap → **💾 Veritabanı Yedekleme** sekmesi.
-2. **🗄️ Tutarlı yedek oluştur (Backup API)** düğmesine bas.
+2. En üstte **son yedek tarihi/saati** ve dosya adı görünür.
+3. **🗄️ Tutarlı yedek oluştur (Backup API)** düğmesine bas.
    - SQLite Backup API kullanılır; WAL'deki son commit'ler de yedeğe girer.
-   - Dosya adına tarih-saat eklenir.
+   - Dosya adına tarih-saat eklenir (`karakoc_yks_yedek_YYYYMMDD_HHMMSS.db`).
    - `PRAGMA integrity_check` otomatik yapılır.
    - Tablo kümesi ve öğrenci sayısı kaynakla karşılaştırılır.
-3. **⬇️ Yedeği İndir (.db)** ile dosyayı indir.
-4. İndirdiğin dosyayı yerel bilgisayarda ve erişimi kısıtlı ikinci bir alanda
+   - İşlem `sistem_loglari` tablosuna `DB_BACKUP` olarak yazılır.
+4. **📂 Yedek arşivi** bölümünde son 10 yedek listelenir (daha eskiler yalnızca
+   uygulamanın ürettiği dosyalar arasından temizlenir).
+5. **🧪 Geçici kopyada geri yükleme testi** ile seçili yedeğin gerçekten
+   açılabildiği, canlı veritabanına dokunmadan kanıtlanır.
+6. **⬇️ Yedeği İndir (.db)** ile dosyayı indir.
+7. İndirdiğin dosyayı yerel bilgisayarda ve erişimi kısıtlı ikinci bir alanda
    sakla.
-5. İstersen **🔎 Yedeği doğrula** ile bütünlüğü yeniden kontrol et.
+8. İstersen **🔎 Yedeği doğrula** ile bütünlüğü yeniden kontrol et.
 
 ## Geri yükleme (yalnızca yetkili yönetici)
 
@@ -42,6 +48,21 @@
 > Mümkünse geri yüklemeyi doğrudan üretim veritabanına değil, önce **geçici bir
 > test kopyasına** uygulayıp doğrulayın. Otomatik test:
 > `tests/test_v25_veritabani_yedek.py`.
+
+## İlerleme denetimi ve kontrollü onarım (v2.6)
+
+Gerçek veritabanında yalnızca **rapor** (salt okunur):
+
+```powershell
+python -m services.maintenance --db yks_veritabani.db
+```
+
+Bariz bozulmaları düzeltmek için (önce otomatik zaman damgalı yedek alır;
+pozitif değerleri değiştirmez, kayıt silmez):
+
+```powershell
+python -m services.maintenance --db yks_veritabani.db --uygula
+```
 
 ## Doğrulama komutları
 

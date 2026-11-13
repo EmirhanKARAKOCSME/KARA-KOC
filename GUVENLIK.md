@@ -68,3 +68,30 @@ yeniden başlatın. Bootstrap yeni hash'i yazar.
 
 Otomatik testler: `tests/test_v25_admin_guvenlik.py`,
 `tests/test_ui_smoke.py` (05–07).
+
+## 6. Cihaz kimliği ve "yalnızca benim cihazım" yaklaşımı
+
+Cihaz/parmak izi (device ID) **tek başına kimlik doğrulama değildir**;
+istemci tarafında üretilen her değer taklit edilebilir. Güvenli bir kısıtlama
+isteniyorsa üç katman ayrılmalıdır:
+
+1. **Kimlik doğrulama:** Yönetici, parola + (tercihen) ikinci faktör ile giriş
+   yapar. Parola/hash sunucu tarafında (secret/env) tutulur.
+2. **Cihaz tanımlama:** Yalnızca *ek sinyal*dir (ör. ilk girişte kaydedilen
+   cihaz parmak izi). Tek başına yetki vermez; çalıntı/klonlanabilir.
+3. **Sunucu tarafı yetkilendirme:** Her admin işlemi, oturum sahibinin
+   veritabanındaki rolünü yeniden doğrular (`auth_service.yetki_dogrula`).
+   İstemciden gelen `rol`, `ogrenci_id` veya cihaz kimliği yetki kanıtı sayılmaz.
+
+Mevcut mimaride admin oturumu ile öğrenci oturumu aynı giriş ekranını kullanır
+ancak yetki kararı her istekte DB'den verilir. İleride ayrı admin uygulaması
+veya sunucu taraflı admin servisi gerekirse bu **ayrı bir aşama** olarak
+planlanmalıdır; mevcut pilot dönemde gereksiz mimari değişiklik yapılmaz.
+
+## 7. Yedekleme işlemlerinin denetimi
+
+- Yedek oluşturma (`DB_BACKUP`) ve geri yükleme (`DB_RESTORE`) işlemleri
+  `sistem_loglari` tablosuna yazılır.
+- Admin panelindeki **"Geçici kopyada geri yükleme testi"**, yedeğin gerçekten
+  açılabildiğini canlı veritabanına dokunmadan kanıtlar.
+- Yedeğin geri yüklenebilirliği doğrulanmadan "yedek alındı" kabul edilmez.

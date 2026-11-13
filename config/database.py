@@ -16,8 +16,10 @@ Güvenlik kuralları (değiştirilmemeli):
 - Şema/migration kodu değişince `config.settings.DB_BOOTSTRAP_SURUMU`
   artırılır; bu, cache anahtarını değiştirip başlangıcı yeniden çalıştırır.
 """
+import os
 import shutil
 import sqlite3
+import tempfile
 from pathlib import Path
 
 import streamlit as st
@@ -69,6 +71,24 @@ def log_islem(ogrenci_id, islem, detay):
 # ==============================================================================
 # Geçerli bir SQLite dosyasının ilk 16 baytı sabittir.
 _SQLITE_BASLIK = b"SQLite format 3\x00"
+
+# Yedek dosyaları veritabanının yanındaki bu klasörde tutulur. Klasör
+# `.gitignore` içindedir; gerçek öğrenci verisi Git'e eklenmez.
+YEDEK_KLASOR_ADI = "KARA_KOC_YEDEK"
+YEDEK_DOSYA_ONEKI = "karakoc_yks_yedek_"
+# Disk şişmesini önlemek için tutulan zaman damgalı yedek sayısı. Daha eski
+# yedekler SADECE bu önekle üretilmiş dosyalar arasından silinir; başka bir
+# dosyaya asla dokunulmaz.
+YEDEK_SAKLAMA_ADEDI = 10
+
+
+def _sqlite_dosyasi_mi(yol) -> bool:
+    """Dosyanın ilk baytları geçerli bir SQLite başlığı mı?"""
+    try:
+        with open(yol, "rb") as dosya:
+            return dosya.read(16) == _SQLITE_BASLIK
+    except OSError:
+        return False
 
 
 def butunluk_kontrol(db_path=None) -> str:
@@ -134,30 +154,210 @@ def yedek_al(hedef_yol, db_path=None) -> str:
     return str(hedef)
 
 
+def _yedek_klasoru(db_path=None, klasor=None) -> Path:
+    """Yedeklerin tutulacağı klasör (varsayılan: DB'nin yanındaki KARA_KOC_YEDEK)."""
+    if klasor:
+        return Path(klasor).expanduser().resolve()
+    return Path(db_yolu(db_path)).parent / YEDEK_KLASOR_ADI
+
+
+def zaman_damgali_yedek(db_path=None, klasor=None) -> dict:
+    """Tarih-saat adlı, doğrulanmış bir yedek üretir ve eskileri temizler.
+
+    - Dosya adı: `karakoc_yks_yedek_YYYYmmdd_HHMMSS.db` (çakışırsa `_1`, `_2`).
+    - SQLite Backup API kullanılır (WAL'deki son commit'ler dâhil).
+    - `integrity_check` + tablo/öğrenci eşleşmesi doğrulanır.
+    - `YEDEK_SAKLAMA_ADEDI` sınırı aşılırsa YALNIZCA aynı önekli en eski
+      dosyalar silinir; başka dosyalara dokunulmaz.
+
+    Gerçek veritabanı **değiştirilmez**; yalnızca okunur.
+    """
+    hedef_klasor = _yedek_klasoru(db_path, klasor)
+    hedef_klasor.mkdir(parents=True, exist_ok=True)
+    kok = YEDEK_DOSYA_ONEKI + get_tr_now().strftime("%Y%m%d_%H%M%S")
+    hedef = hedef_klasor / (kok + ".db")
+    sayac = 0
+    while hedef.exists():
+        sayac += 1
+        hedef = hedef_klasor / ("%s_%d.db" % (kok, sayac))
+
+    yol = yedek_al(hedef, db_path=db_path)
+    dogrulama = yedek_dogrula(yol, kaynak_db_path=db_path)
+
+    # Saklama sınırı: yalnızca uygulamanın ürettiği yedekler.
+    try:
+        yedekler = sorted(
+            hedef_klasor.glob(YEDEK_DOSYA_ONEKI + "*.db"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for eski in yedekler[YEDEK_SAKLAMA_ADEDI:]:
+            eski.unlink()
+    except OSError:
+        # Temizlik başarısız olsa da yeni yedek geçerlidir.
+        pass
+
+    return {
+        "yol": yol,
+        "dosya_adi": Path(yol).name,
+        "boyut": Path(yol).stat().st_size,
+        "saglikli": bool(dogrulama.get("saglikli")),
+        "butunluk": dogrulama.get("butunluk"),
+        "tablo_sayisi": dogrulama.get("tablo_sayisi"),
+        "ogrenci_sayisi": dogrulama.get("ogrenci_sayisi"),
+        "dogrulama": dogrulama,
+    }
+
+
+def yedek_listesi(klasor=None, db_path=None) -> list:
+    """Klasördeki zaman damgalı yedekleri (en yeni önce) listeler."""
+    hedef_klasor = _yedek_klasoru(db_path, klasor)
+    if not hedef_klasor.exists():
+        return []
+    kayitlar = []
+    for dosya in hedef_klasor.glob(YEDEK_DOSYA_ONEKI + "*.db"):
+        try:
+            istatistik = dosya.stat()
+        except OSError:
+            continue
+        kayitlar.append({
+            "yol": str(dosya),
+            "dosya_adi": dosya.name,
+            "boyut": istatistik.st_size,
+            "degisim_ts": istatistik.st_mtime,
+            "tarih": get_tr_now().fromtimestamp(
+                istatistik.st_mtime
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+        })
+    kayitlar.sort(key=lambda k: k["degisim_ts"], reverse=True)
+    return kayitlar
+
+
+def son_yedek_bilgisi(klasor=None, db_path=None):
+    """En son başarılı görünen yedeğin bilgisi (yoksa None)."""
+    yedekler = yedek_listesi(klasor=klasor, db_path=db_path)
+    return yedekler[0] if yedekler else None
+def yedekten_gecici_dogrula(yedek_yolu, kaynak_db_path=None) -> dict:
+    """Yedeği GEÇİCİ bir dosyaya açıp geri yüklenebilirliğini kanıtlar.
+
+    Canlı veritabanına hiçbir şey yazılmaz. Dönen `geri_yuklenebilir` alanı
+    yalnızca dosya açılabiliyor, bütünlük `ok` ve en az bir tablo varsa True'dur.
+    """
+    yol = Path(yedek_yolu).expanduser().resolve()
+    if not yol.exists():
+        raise FileNotFoundError("Yedek dosyası bulunamadı: %s" % yol)
+    if not _sqlite_dosyasi_mi(yol):
+        raise sqlite3.DatabaseError("Geçersiz dosya: SQLite veritabanı değil.")
+
+    gecici = tempfile.NamedTemporaryFile(
+        prefix="karakoc_restore_test_", suffix=".db", delete=False
+    )
+    gecici.close()
+    gecici_yol = gecici.name
+    try:
+        shutil.copy2(yol, gecici_yol)
+        sonuc = yedek_dogrula(gecici_yol, kaynak_db_path=kaynak_db_path)
+        sonuc["kaynak_yedek"] = str(yol)
+        sonuc["geri_yuklenebilir"] = bool(
+            sonuc.get("butunluk") == "ok"
+            and sonuc.get("tablo_sayisi", 0) > 0
+            and sonuc.get("saglikli")
+        )
+        return sonuc
+    finally:
+        try:
+            os.unlink(gecici_yol)
+        except OSError:
+            pass
+
+
 def geri_yukle(icerik, db_path=None) -> dict:
-    """Yedek baytlarını aktif veritabanına güvenli biçimde geri yükler.
+    """Yedek baytlarını aktif veritabanına KONTROLLÜ biçimde geri yükler.
 
     Adımlar:
-    1. SQLite başlığı doğrulanır (geçersiz dosya reddedilir).
-    2. Mevcut veritabanı `.bak` güvenlik kopyasına alınır.
-    3. WAL/SHM artıkları temizlenir (geri yüklenen dosyayı bozmasın).
-    4. Geri yükleme sonrası `integrity_check` yapılır.
+    1. SQLite başlığı ve içerik doğrulanır; geçici bir dosyada
+       `integrity_check` yapılır (geçersiz/bozuk yedek reddedilir).
+    2. Mevcut veritabanı Backup API ile `.bak` güvenlik kopyasına alınır.
+    3. Mevcut WAL checkpoint edilir; yeni içerik atomik olarak yerleştirilir.
+    4. Geri yükleme sonrası bütünlük kontrol edilir; hata olursa `.bak`
+       kopyasından otomatik geri dönülür.
 
     Geri yükleme yalnızca yönetici tarafından çağrılmalıdır.
     """
     if not isinstance(icerik, (bytes, bytearray)):
         raise sqlite3.DatabaseError("Yedek içeriği bayt dizisi olmalı.")
-    if not bytes(icerik).startswith(_SQLITE_BASLIK):
+    veri = bytes(icerik)
+    if not veri.startswith(_SQLITE_BASLIK):
         raise sqlite3.DatabaseError("Geçersiz dosya: SQLite veritabanı değil.")
 
     hedef = Path(db_yolu(db_path))
+    hedef.parent.mkdir(parents=True, exist_ok=True)
+    atomik = hedef.with_name(hedef.name + ".restore.tmp")
     guvenlik = None
+
+    # 1) İçeriği canlı DB'ye dokunmadan geçici dosyada doğrula.
+    gecici = tempfile.NamedTemporaryFile(
+        prefix="karakoc_restore_onkontrol_", suffix=".db", delete=False
+    )
+    try:
+        gecici.write(veri)
+        gecici.flush()
+        os.fsync(gecici.fileno())
+        gecici.close()
+        kontrol = sqlite3.connect(gecici.name)
+        try:
+            butunluk_aday = str(
+                kontrol.execute("PRAGMA integrity_check").fetchone()[0]
+            )
+            tablo_aday = int(
+                kontrol.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+                ).fetchone()[0]
+            )
+        finally:
+            kontrol.close()
+    finally:
+        try:
+            if not gecici.closed:
+                gecici.close()
+        finally:
+            try:
+                os.unlink(gecici.name)
+            except OSError:
+                pass
+
+    if butunluk_aday != "ok":
+        raise sqlite3.DatabaseError(
+            "Geri yükleme reddedildi: yedek bütünlük hatası (%s)." % butunluk_aday
+        )
+    if tablo_aday <= 0:
+        raise sqlite3.DatabaseError(
+            "Geri yükleme reddedildi: yedekte tablo bulunmuyor."
+        )
+
+    # 2) Mevcut veritabanının güvenlik kopyası (WAL dâhil, tutarlı).
     if hedef.exists():
         guvenlik = hedef.with_name(hedef.name + ".bak")
-        shutil.copy2(hedef, guvenlik)
+        try:
+            yedek_al(guvenlik, db_path=str(hedef))
+        except Exception:  # noqa: BLE001 - Backup API başarısızsa düz kopya
+            shutil.copy2(hedef, guvenlik)
 
-    hedef.parent.mkdir(parents=True, exist_ok=True)
-    hedef.write_bytes(bytes(icerik))
+    # 3) WAL'i kapat, içeriği atomik yaz.
+    try:
+        mevcut = sqlite3.connect(str(hedef), timeout=20)
+        try:
+            mevcut.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            mevcut.close()
+    except sqlite3.Error:
+        pass
+
+    with open(atomik, "wb") as dosya:
+        dosya.write(veri)
+        dosya.flush()
+        os.fsync(dosya.fileno())
+    os.replace(atomik, hedef)
     for uzanti in ("-wal", "-shm"):
         artik = hedef.with_name(hedef.name + uzanti)
         if artik.exists():
@@ -166,9 +366,17 @@ def geri_yukle(icerik, db_path=None) -> dict:
             except OSError:
                 pass
 
+    # 4) Son doğrulama; hata varsa güvenlik kopyasına dön.
     sonuc = butunluk_kontrol(db_path)
     if sonuc != "ok":
-        raise sqlite3.DatabaseError("Geri yükleme sonrası bütünlük hatası: %s" % sonuc)
+        if guvenlik and guvenlik.exists():
+            try:
+                shutil.copy2(guvenlik, hedef)
+            except OSError:
+                pass
+        raise sqlite3.DatabaseError(
+            "Geri yükleme sonrası bütünlük hatası: %s" % sonuc
+        )
     return {
         "butunluk": sonuc,
         "yol": str(hedef),
