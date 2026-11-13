@@ -150,6 +150,7 @@ dashboard.render(
     gercek_orand,
     tyt_orani,
     ayt_orani,
+    hedef_yuzd,
 )
 
 # ==============================================================================

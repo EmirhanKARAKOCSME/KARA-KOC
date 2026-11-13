@@ -392,6 +392,154 @@ def cekirdek_tamam_orani(ders, bilinen, biten_mikro=None):
     return tamam / float(len(liste))
 
 
+
 def cekirdek_acik_mi(ders, bilinen, biten_mikro=None):
     """AYT dersinin çekirdek TYT kilidi açık mı? (>= %80 tamamlanmış)"""
     return cekirdek_tamam_orani(ders, bilinen, biten_mikro) >= CEKIRDEK_ESIK_ORANI
+
+
+# ---------------------------------------------------------------------------
+# 7) MÜFREDAT DENETİMİ (v2.6, saf/yan etkisiz)
+# ---------------------------------------------------------------------------
+def _havuz_mikro_haritasi(havuz):
+    """{ders: [mikro...]} — aynı ders anahtarı varsa tekilleştirir."""
+    sonuc = {}
+    for ders, makro_dict in (havuz or {}).items():
+        if not isinstance(makro_dict, dict):
+            continue
+        liste = []
+        for mikrolar in makro_dict.values():
+            if isinstance(mikrolar, list):
+                liste.extend(m for m in mikrolar if m)
+        sonuc[ders] = liste
+    return sonuc
+
+
+def klasik_havuz():
+    """12/Mezun öğrencinin gördüğü TYT + AYT + YDT havuzu (tek sözlük)."""
+    havuz = {}
+    for ders, makro in mufredat_klasik.get("TYT", {}).items():
+        havuz[ders] = makro
+    for _alan, dersler in mufredat_klasik.get("AYT", {}).items():
+        for ders, makro in dersler.items():
+            havuz.setdefault(ders, makro)
+    for ders, makro in mufredat_klasik.get("YDT (Dil)", {}).items():
+        havuz[ders] = makro
+    return havuz
+
+
+def mufredat_denetimi():
+    """Müfredat/mikro konu/ön koşul bütünlüğünü raporlar (yazma yapmaz).
+
+    Dönen sözlük rapor amaçlıdır; `sorun_sayisi == 0` ise yapı tutarlıdır.
+    Kontroller:
+      - Her mikro konunun alt başlığı var mı?
+      - Aynı ders içinde mükerrer mikro konu var mı?
+      - Ön koşul anahtarı/ders/karşılığı gerçek bir mikro konuya çözülüyor mu?
+      - AYT derslerinin ön koşul kapsaması (kaç mikro için kural var).
+      - Çekirdek TYT ön koşulları klasik havuzda bulunuyor mu? (alias + fuzzy)
+    """
+    from data.curriculum_aliases import kanonik_konular
+    from data.prerequisites import ON_KOSULLAR
+    from data.subtopics import MIKRO_ALT_KONULAR
+
+    havuzlar = {
+        "maarif9": _havuz_mikro_haritasi(mufredat_maarif_9),
+        "maarif11": _havuz_mikro_haritasi(mufredat_maarif_11),
+        "klasik": _havuz_mikro_haritasi(klasik_havuz()),
+    }
+    tum_mikrolar = set()
+    for harita in havuzlar.values():
+        for liste in harita.values():
+            tum_mikrolar.update(liste)
+    normalize = {normalize_konu_adi(m) for m in tum_mikrolar}
+
+    rapor = {
+        "havuzlar": {
+            ad: {
+                "ders_sayisi": len(harita),
+                "makro_sayisi": sum(
+                    len(v) for v in (kaynak or {}).values()
+                    if isinstance(v, dict)
+                ),
+                "mikro_sayisi": sum(len(v) for v in harita.values()),
+            }
+            for ad, harita in havuzlar.items()
+            for kaynak in [_kaynak_havuz(ad)]
+        },
+        "eksik_alt_konu": [],
+        "mukerrer_mikro": [],
+        "onkosul_hedefi_yok": [],
+        "onkosul_ders_yok": [],
+        "ayt_kapsama": {},
+        "cekirdek_eslesmeyen": [],
+        "sorun_sayisi": 0,
+    }
+
+    for ad, harita in havuzlar.items():
+        for ders, liste in harita.items():
+            gorulen = set()
+            for mikro in liste:
+                if mikro in gorulen:
+                    rapor["mukerrer_mikro"].append((ad, ders, mikro))
+                gorulen.add(mikro)
+                if mikro not in MIKRO_ALT_KONULAR:
+                    rapor["eksik_alt_konu"].append((ad, ders, mikro))
+
+    for anahtar, kural in ON_KOSULLAR.items():
+        ders = kural.get("ders")
+        if ders and ders not in havuzlar["klasik"] \
+                and ders not in havuzlar["maarif9"] \
+                and ders not in havuzlar["maarif11"]:
+            rapor["onkosul_ders_yok"].append((anahtar, ders))
+        for hedef in kural.get("on_kosul", []) or []:
+            adaylar = kanonik_konular(hedef)
+            bulundu = False
+            for aday in adaylar:
+                if aday in tum_mikrolar:
+                    bulundu = True
+                    break
+                norm = normalize_konu_adi(aday)
+                if any(norm in mevcut for mevcut in normalize):
+                    bulundu = True
+                    break
+            if not bulundu:
+                rapor["onkosul_hedefi_yok"].append((anahtar, hedef))
+
+    for ders, liste in havuzlar["klasik"].items():
+        if str(ders).startswith("AYT"):
+            kapsanan = sum(1 for m in liste if m in ON_KOSULLAR)
+            rapor["ayt_kapsama"][ders] = {
+                "kapsanan": kapsanan,
+                "toplam": len(liste),
+                "oran": round(kapsanan / float(len(liste)), 3) if liste else 0.0,
+            }
+
+    for ders, gerekli in CEKIRDEK_TYT_ONKOSULLAR.items():
+        for konu in gerekli:
+            adaylar = kanonik_konular(konu)
+            if not any(
+                a in tum_mikrolar
+                or any(normalize_konu_adi(a) in mevcut for mevcut in normalize)
+                for a in adaylar
+            ):
+                rapor["cekirdek_eslesmeyen"].append((ders, konu))
+
+    rapor["sorun_sayisi"] = (
+        len(rapor["eksik_alt_konu"])
+        + len(rapor["mukerrer_mikro"])
+        + len(rapor["onkosul_hedefi_yok"])
+        + len(rapor["onkosul_ders_yok"])
+        + len(rapor["cekirdek_eslesmeyen"])
+    )
+    return rapor
+
+
+def _kaynak_havuz(ad):
+    """Denetim raporundaki ham havuzu ada göre döndürür."""
+    if ad == "maarif9":
+        return mufredat_maarif_9
+    if ad == "maarif11":
+        return mufredat_maarif_11
+    return klasik_havuz()
+

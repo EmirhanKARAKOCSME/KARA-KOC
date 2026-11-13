@@ -445,4 +445,56 @@ _ON_KOSULLAR_PLANLAYICI_EK = {
 }
 
 
-ON_KOSULLAR = {**_ON_KOSULLAR_PLANLAYICI_EK, **_ON_KOSULLAR_TEMEL}
+# v2.6 — EKSİK ÖN KOŞUL TAMAMLAMASI (AYT Geometri).
+# Çakışma analizi: bu anahtarlardan hiçbiri `_ON_KOSULLAR_TEMEL` veya
+# `_ON_KOSULLAR_PLANLAYICI_EK` içinde YOKTUR; mevcut kurallar ezilmez.
+# Ön koşulların tamamı TYT Geometri müfredatında birebir bulunur.
+_ON_KOSULLAR_V26_EK = {
+    "Çemberde Açı": {
+        "ders": "AYT Geometri",
+        "on_kosul": ["Üçgende Açılar", "Dörtgenler ve Özel Dörtgenler"],
+        "min_sinif": 3,
+    },
+    "Çemberde Uzunluk": {
+        "ders": "AYT Geometri",
+        "on_kosul": ["Çemberde Açı", "Dik Üçgen ve Pisagor"],
+        "min_sinif": 3,
+    },
+    "Dairede Çevre ve Alan": {
+        "ders": "AYT Geometri",
+        "on_kosul": ["Çemberde Uzunluk"],
+        "min_sinif": 3,
+    },
+    "Noktanın Analitik İncelemesi": {
+        "ders": "AYT Geometri",
+        "on_kosul": ["Temel Kavramlar ve Doğruda Açılar", "Dik Üçgen ve Pisagor"],
+        "min_sinif": 3,
+    },
+    "Doğrunun Analitik İncelemesi": {
+        "ders": "AYT Geometri",
+        "on_kosul": ["Noktanın Analitik İncelemesi"],
+        "min_sinif": 3,
+    },
+    "Prizmalar ve Küp": {
+        "ders": "AYT Geometri",
+        "on_kosul": ["Çokgenler", "Dörtgenler ve Özel Dörtgenler"],
+        "min_sinif": 3,
+    },
+    "Silindir ve Koni": {
+        "ders": "AYT Geometri",
+        "on_kosul": ["Prizmalar ve Küp", "Dairede Çevre ve Alan"],
+        "min_sinif": 3,
+    },
+    "Piramit ve Küre": {
+        "ders": "AYT Geometri",
+        "on_kosul": ["Silindir ve Koni"],
+        "min_sinif": 3,
+    },
+}
+
+
+ON_KOSULLAR = {
+    **_ON_KOSULLAR_PLANLAYICI_EK,
+    **_ON_KOSULLAR_V26_EK,
+    **_ON_KOSULLAR_TEMEL,
+}

@@ -149,7 +149,7 @@ def hesapla_hiz_katsayisi(ogrenci_id):
 def program_durumu_yukle(ogrenci_id):
     with get_connection() as c:
         df_b = pd.read_sql_query(
-            "SELECT mikro_konu FROM konu_durumlari_detay WHERE ogrenci_id = ?"
+            "SELECT ders, mikro_konu FROM konu_durumlari_detay WHERE ogrenci_id = ?"
             " AND durum = 'Biliyorum'", c, params=(ogrenci_id,),
         )
         df_s = pd.read_sql_query(
@@ -189,6 +189,11 @@ def program_durumu_yukle(ogrenci_id):
             pass
     return {
         "bilinen_mikro": set(df_b["mikro_konu"].tolist()),
+        # v2.6: ders + mikro ÇİFTİ. Aynı adlı mikro konular farklı derslerde
+        # bulunabildiği için kamp kuyruğu yalnızca bu çifti kullanmalıdır.
+        "bilinen_ciftler": set(
+            zip(df_b["ders"].tolist(), df_b["mikro_konu"].tolist())
+        ),
         "ogrenilmis_konular": ogrenilmis,
         "cozulen": {
             (r["ders"], r["mikro_konu"]): int(r["cozulen_soru"] or 0)

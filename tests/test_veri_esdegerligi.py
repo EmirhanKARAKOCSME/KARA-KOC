@@ -46,7 +46,9 @@ PARMAK_IZLERI = {
     "MIKRO_ALT_KONULAR": "16ec8308",
     "_ALT_TYT": "e0e14465",
     "_ALT_AYT_SAYISAL": "530f0b8c",
-    "ON_KOSULLAR": "3f0d2bf2",
+    # v2.6: AYT Geometri için 8 eksik ön koşul eklendi (mevcut kurallar
+    # DEĞİŞMEDİ; 73 -> 81). Yeni parmak izi bu genişletilmiş haritaya aittir.
+    "ON_KOSULLAR": "30056c6a",
     "KONU_SURELERI_DK": "613d5583",
     "SORU_AGIRLIKLARI": "9044afb4",
     "SINIF_SEVIYE_SKORU": "0dbb7bf1",
@@ -96,11 +98,12 @@ class VeriEsdegerligiTestleri(unittest.TestCase):
         )
 
     def test_on_kosul_birlesimi_ayni(self):
-        """{**EK, **TEMEL} sonucu tek veri yapısında birebir korundu."""
+        """{**EK, **TEMEL} önceliği korunur; v2.6'da yalnızca EK kayıt eklendi."""
         self.assertEqual(parmak_izi(ON_KOSULLAR), PARMAK_IZLERI["ON_KOSULLAR"])
         # v2.5: kopuk bağlantılar düzeltilip eski adlar kanonik başlıklara
         # ayrıştırıldığı için kayıt sayısı 70 -> 73 oldu.
-        self.assertEqual(len(ON_KOSULLAR), 73)
+        # v2.6: AYT Geometri için 8 eksik kural eklendi -> 81.
+        self.assertEqual(len(ON_KOSULLAR), 81)
 
     def test_on_kosul_ek_artik_yok(self):
         """Birleşik veri tek yapıya taşındı; `ON_KOSULLAR_EK` kaldırıldı."""

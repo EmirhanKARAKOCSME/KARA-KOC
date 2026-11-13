@@ -238,6 +238,11 @@
         padding-top: 0.5rem;
         padding-bottom: 0.5rem;
     }
+    /* v2.6: uzun makro/mikro başlıkları taşmaz, üst üste binmez. */
+    h1, h2, h3, h4, h5, .kamp-mikro-baslik, .kamp-makro-ad {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
     .stButton > button,
     .stDownloadButton > button {
         min-height: 44px;

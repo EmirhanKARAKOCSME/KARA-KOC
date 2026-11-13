@@ -5,6 +5,7 @@ oturum durumu yönetir. Kokpit; soğuk uzay arka planı, 5'li tema seçici, tek
 görev kartı (makro ünite ilerleme çubuğu + canlı kronometre + +/- sayaçları)
 ve yorgunluk merdivenini sunar.
 """
+import html
 import time
 
 import streamlit as st
@@ -19,7 +20,7 @@ PROTOKOL_METNI = (
     "oturumu geçersiz sayılır."
 )
 
-_KAMP_DILIM_HEDEF = kamp_motoru.KAMP_MAKS_DILIM_SORU * 2  # mikro başına ~30 soru
+_KAMP_DILIM_HEDEF = kamp_motoru.KAMP_MAKS_DILIM_SORU * 2  # geriye dönük uyumluluk
 
 
 def _tema_gradyan(tema):
@@ -126,6 +127,58 @@ def _css(tema):
             font-size:0.74rem; letter-spacing:0.09em; text-transform:uppercase;}
         .kamp-adim {color:#CBD5E1; font-size:0.92rem; margin:5px 0;
             padding-left:14px; border-left:2px solid rgba(184,151,90,0.55);}
+        /* v2.6 — İKİ AYRI İLERLEME ÇUBUĞU ------------------------------- */
+        /* 1) Makro konu: belirgin, altın/amber tonlu, güçlü. */
+        .kamp-makro-bar {background:linear-gradient(135deg, rgba(35,26,10,0.96),
+            rgba(12,14,20,0.96)); border:1px solid #b8975a; border-radius:16px;
+            padding:14px 18px 12px 18px; margin:6px 0 10px 0;
+            box-shadow:0 0 26px rgba(184,151,90,0.18);}
+        .kamp-makro-ust {display:flex; justify-content:space-between;
+            align-items:baseline; color:#E7C98B; font-size:0.72rem;
+            letter-spacing:0.24em; text-transform:uppercase;}
+        .kamp-makro-yuzde {font-size:1.15rem; font-weight:800; color:#F5D48B;
+            letter-spacing:0.02em;}
+        .kamp-makro-ad {font-size:clamp(1.0rem, 3.4vw, 1.35rem); font-weight:700;
+            color:#F8FAFC; margin:4px 0 9px 0; line-height:1.25;}
+        .kamp-makro-alt {color:#A8B3C2; font-size:0.74rem; margin-top:7px;}
+        .kamp-bar-iz {width:100%; height:14px; border-radius:999px;
+            background:rgba(148,163,184,0.16); overflow:hidden;
+            border:1px solid rgba(184,151,90,0.28);}
+        .kamp-bar-iz-ince {height:8px; border-radius:999px;
+            border:1px solid rgba(56,189,248,0.28);}
+        .kamp-makro-dolu {height:100%; border-radius:999px;
+            background:linear-gradient(90deg,#b8975a,#f5d48b);
+            box-shadow:0 0 14px rgba(245,212,139,0.55);
+            transition:width 0.35s ease;}
+        /* 2) Görev serisi: ikincil, ince, camgöbeği/mavi. */
+        .kamp-gorev-bar {background:rgba(8,22,34,0.72); border:1px solid #1e4b63;
+            border-radius:12px; padding:9px 14px 10px 14px; margin:0 0 10px 0;}
+        .kamp-gorev-ust {display:flex; justify-content:space-between;
+            color:#7DD3FC; font-size:0.68rem; letter-spacing:0.20em;
+            text-transform:uppercase; margin-bottom:6px;}
+        .kamp-gorev-dolu {height:100%; border-radius:999px;
+            background:linear-gradient(90deg,#2dd4bf,#38bdf8);
+            transition:width 0.35s ease;}
+        /* Görev kartı: mikro konu EN BELİRGİN başlık. */
+        .kamp-gorev-karti {border-color:#334155;}
+        .kamp-ders-ust {color:#93A4B8; font-size:0.68rem; letter-spacing:0.18em;
+            text-transform:uppercase;}
+        .kamp-makro-kucuk {color:#A8B3C2; font-size:0.86rem; margin-top:2px;}
+        .kamp-mikro-baslik {color:#FFFFFF; font-size:clamp(1.2rem, 4.2vw, 1.9rem);
+            font-weight:800; line-height:1.22; margin:4px 0 8px 0;
+            letter-spacing:0.01em;}
+        .kamp-soru-satiri {display:inline-block; margin-top:8px; padding:3px 12px;
+            border-radius:999px; background:rgba(56,189,248,0.12);
+            border:1px solid rgba(56,189,248,0.45); color:#BAE6FD;
+            font-size:0.8rem; font-weight:700;}
+        @media (orientation: landscape) and (max-height: 520px) {
+            .kamp-makro-bar {padding:8px 12px 7px 12px; margin:2px 0 6px 0;}
+            .kamp-makro-ad {font-size:1.0rem; margin:2px 0 5px 0;}
+            .kamp-gorev-bar {padding:6px 10px 7px 10px; margin-bottom:6px;}
+            .kamp-mikro-baslik {font-size:1.1rem; margin:2px 0 4px 0;}
+            .kamp-bar-iz {height:10px;}
+            .kamp-bar-iz-ince {height:7px;}
+        }
         /* Tema ile bütünleşik giriş alanları (beyaz kutular azaltıldı). */
         .stSelectbox div[data-baseweb="select"] > div,
         .stNumberInput input {
@@ -178,7 +231,11 @@ def _veri_yukle(ctx):
         from services.program_motoru import program_durumu_yukle
 
         durum = program_durumu_yukle(ctx.user["id"])
-        bilinen = set(durum.get("bilinen_mikro") or ())
+        # v2.6: ders+mikro çiftleri önceliklidir; aynı adlı konular farklı
+        # derslerde birbirini yanlışlıkla "biliniyor" yapmaz.
+        bilinen = set(durum.get("bilinen_ciftler") or ())
+        if not bilinen:
+            bilinen = set(durum.get("bilinen_mikro") or ())
     except Exception:  # noqa: BLE001
         bilinen = set()
     try:
@@ -357,40 +414,121 @@ def render(ctx):
 
     bilinen, biten = _veri_yukle(ctx)
     try:
-        kilit = kamp_motoru.aktif_makro_unite_hesapla(
+        kuyruk = kamp_motoru.kamp_kuyrugu_hesapla(
             secilen_ders, ctx.mufredat or {}, bilinen, biten, sinif, alan
         )
-    except Exception:  # noqa: BLE001
-        kilit = None
-    if not kilit:
-        st.success("Bu dersin tüm makro üniteleri tamamlanmış. Başka bir branş seç.")
+    except Exception as hata:  # noqa: BLE001
+        st.error("Kamp görev kuyruğu hesaplanamadı (teknik): %s" % hata)
         return
+
+    durum = kuyruk.get("durum")
+    if durum == "tanim_eksik":
+        st.error(
+            "Bu branş için mikro konu tanımı eksik (teknik uyarı). "
+            "Lütfen başka bir branş seçin; ilerlemeniz korunur."
+        )
+        return
+    if durum == "onkosul_kilitli":
+        eksik = kuyruk.get("eksik_onkosular") or []
+        st.warning(
+            "Bu AYT dersine geçmek için TYT ön koşulları henüz tamamlanmadı. "
+            "Bu bir 'tüm konular bitti' durumu DEĞİLDİR; mevcut ilerlemeniz "
+            "silinmedi."
+        )
+        if eksik:
+            st.markdown(
+                "**Eksik TYT konuları:** " + ", ".join(html.escape(e) for e in eksik)
+            )
+        st.caption(
+            "Önce bu TYT konularını Konu Takip sekmesinden çalışıp tamamlayın. "
+            "Çekirdek tamamlanma: %%%s (eşik %%%s)."
+            % (kuyruk.get("oran", 0), kuyruk.get("esik", 80))
+        )
+        return
+    if durum == "tamamlandi":
+        st.success(
+            "✅ Bu dersin TÜM mikro konuları gerçekten tamamlandı. "
+            "Başka bir branş seçebilirsiniz."
+        )
+        return
+    if durum != "hazir":
+        st.error("Kamp görev durumu bilinmiyor (teknik). Lütfen tekrar deneyin.")
+        return
+
+    kilit = kuyruk
+    if st.session_state.get("kamp_aktif_makro") != kilit["makro_unite"]:
+        st.session_state["kamp_aktif_makro"] = kilit["makro_unite"]
+        st.session_state["kamp_mikro_idx"] = 0
+        st.session_state["kamp_dilim_idx"] = 0
+        _temizle_gorev_durumu()
 
     mikrolar = kilit.get("mikrolar") or []
     if not mikrolar:
-        st.success("Bu ünite tamamlandı.")
+        st.success("Bu ünitedeki tüm mikro konular tamamlandı.")
         return
-    mikro_idx = min(int(st.session_state.get("kamp_mikro_idx", 0)), len(mikrolar) - 1)
+    mikro_idx = int(st.session_state.get("kamp_mikro_idx", 0))
+    if mikro_idx < 0 or mikro_idx >= len(mikrolar):
+        mikro_idx = 0
     st.session_state["kamp_mikro_idx"] = mikro_idx
     aktif_mikro = mikrolar[mikro_idx]
 
-    # Makro ünite ilerleme yüzdesi
+    # --- 1. ÇUBUK: MAKRO KONU İLERLEMESİ (mikro konulardan türetilir) ----
     try:
-        from services.topic_progress import makro_unite_ilerleme_durumu
+        from services.topic_progress import makro_ilerleme_detay
 
-        ilerleme = makro_unite_ilerleme_durumu(
+        makro_detay = makro_ilerleme_detay(
             ctx.user["id"], secilen_ders, kilit["makro_unite"], ctx.mufredat
         )
     except Exception:  # noqa: BLE001
-        ilerleme = 0
+        makro_detay = {"oran": 0.0, "tamamlanan": 0, "toplam": len(mikrolar)}
+    makro_oran = max(0.0, min(100.0, float(makro_detay.get("oran") or 0.0)))
     st.markdown(
-        f'<div class="kamp-dilim">ÜNİTE İLERLEMESİ: %{int(ilerleme)} — {kilit["makro_unite"]}</div>',
+        '<div class="kamp-makro-bar">'
+        '<div class="kamp-makro-ust"><span>MAKRO KONU</span>'
+        '<span class="kamp-makro-yuzde">%%%.1f</span></div>'
+        '<div class="kamp-makro-ad">%s</div>'
+        '<div class="kamp-bar-iz"><div class="kamp-makro-dolu" '
+        'style="width:%.1f%%"></div></div>'
+        '<div class="kamp-makro-alt">%s / %s mikro konu tamamlandı</div>'
+        '</div>'
+        % (
+            makro_oran,
+            html.escape(str(kilit["makro_unite"])),
+            makro_oran,
+            int(makro_detay.get("tamamlanan") or 0),
+            int(makro_detay.get("toplam") or len(mikrolar)),
+        ),
         unsafe_allow_html=True,
     )
-    st.progress(min(1.0, max(0.0, ilerleme / 100.0)))
 
-    # --- Atomik dilim ---------------------------------------------------
-    dilimler = kamp_motoru.mikro_dilimle(_KAMP_DILIM_HEDEF)
+    # --- 2. ÇUBUK: GÖREV İLERLEMESİ (aktif mikro konunun dilimleri) ------
+    try:
+        gorev_il = kamp_motoru.mikro_dilim_ilerlemesi(
+            ctx.user["id"], secilen_ders, aktif_mikro
+        )
+    except Exception:  # noqa: BLE001
+        gorev_il = {"tamamlanan": 0, "toplam": 1, "oran": 0.0}
+    gorev_oran = max(0.0, min(100.0, float(gorev_il.get("oran") or 0.0)))
+    st.markdown(
+        '<div class="kamp-gorev-bar">'
+        '<div class="kamp-gorev-ust"><span>GÖREV İLERLEMESİ</span>'
+        '<span>%s/%s</span></div>'
+        '<div class="kamp-bar-iz kamp-bar-iz-ince"><div class="kamp-gorev-dolu" '
+        'style="width:%.1f%%"></div></div>'
+        '</div>'
+        % (
+            int(gorev_il.get("tamamlanan") or 0),
+            int(gorev_il.get("toplam") or 1),
+            gorev_oran,
+        ),
+        unsafe_allow_html=True,
+    )
+
+    # --- Atomik dilimler: 8 soru (normal 3, pekiştirme 6 dilim) ----------
+    dilimler = kamp_motoru.gorev_dilimleri(secilen_ders)
+    if not dilimler:
+        st.error("Görev dilimi tanımı eksik (teknik).")
+        return
     dilim_idx = min(int(st.session_state.get("kamp_dilim_idx", 0)), len(dilimler) - 1)
     st.session_state["kamp_dilim_idx"] = dilim_idx
     st.session_state["kamp_toplam_dilim"] = len(dilimler)
@@ -406,18 +544,19 @@ def render(ctx):
             f'yanlış ve boş sorularını incele, çözümünü kontrol et; sonra devam et.</div>',
             unsafe_allow_html=True,
         )
-        if st.button("Analizi Tamamla ve Devam Et", type="primary",
+        if st.button("Analizi Tamamla ve Aynı Dilimi Tekrar Et", type="primary",
                      key="kamp_analiz_devam"):
+            # Başarısız dilim ATLANMAZ; aynı dilim yeniden çalışılır.
             st.session_state.pop("kamp_analiz", None)
-            _ilerle()
             st.rerun()
         return
 
     # --- Pedagojik görev planı (tür + çalışma adımları) ----------------
     plan = kamp_motoru.gorev_plani_uret(
-        secilen_ders, kilit["makro_unite"], aktif_mikro, dilim["hedef_soru"]
+        secilen_ders, kilit["makro_unite"], aktif_mikro, dilim["hedef_soru"],
+        dilim_no=dilim["dilim_no"], seviye=dilim.get("seviye"),
     )
-    anahtar = (secilen_ders, aktif_mikro, dilim["dilim_no"])
+    anahtar = (oturum_id, secilen_ders, aktif_mikro, dilim["dilim_no"])
     if st.session_state.get("kamp_kayit_anahtar") != anahtar:
         kayit = kamp_motoru.mikro_gorev_baslat(
             oturum_id, ctx.user["id"], secilen_ders, kilit["makro_unite"],
@@ -425,33 +564,46 @@ def render(ctx):
             dilim_no=dilim["dilim_no"], toplam_dilim=dilim["toplam_dilim"],
             pedagoji_turu=plan["pedagoji_turu"], gorev_turu=plan["gorev_turu"],
             adimlar=plan["adimlar"], soru_gerekli=plan["soru_gerekli"],
+            seviye=dilim.get("seviye"),
         )
         st.session_state["kamp_kayit_id"] = kayit["id"] if kayit else None
         st.session_state["kamp_kayit_anahtar"] = anahtar
         st.session_state["kamp_sonuc_bekliyor"] = False
+        st.session_state["kamp_sonuc_kaydedildi"] = None
 
     kayit_id = st.session_state.get("kamp_kayit_id")
 
-    # --- Görev kartı (ders / makro / mikro / tür / bölüm / hedef) ------
+    # --- Görev kartı: ÖNCE MİKRO KONU, sonra makro/bağlam ----------------
     gorev_etiketi = (
         "KONU ÖĞRENME + PEKİŞTİRME"
         if plan["pedagoji_turu"] != "Ezber"
         else "KONU ÖĞRENME + EZBER"
     )
+    seviye_etiketi = str(dilim.get("seviye") or "").capitalize()
     soru_satiri = (
-        f'<div class="kamp-dilim">{int(dilim["hedef_soru"])} SORU</div>'
+        '<div class="kamp-soru-satiri">%d soru</div>'
+        % int(dilim["hedef_soru"])
         if plan["soru_gerekli"] else ""
     )
     st.markdown(
-        '<div class="kamp-dilim" style="margin-top:8px;">BÖLÜM '
-        f'{dilim["dilim_no"]} / {dilim["toplam_dilim"]}</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="kamp-kart"><div class="kamp-dilim">{secilen_ders.upper()}</div>'
-        f'<div class="kamp-mikro"><b>{kilit["makro_unite"]}</b> ➔ {aktif_mikro}</div>'
-        f'<div class="kamp-gorev-tur">GÖREV: {gorev_etiketi}</div>'
-        f'{soru_satiri}</div>',
+        '<div class="kamp-kart kamp-gorev-karti">'
+        '<div class="kamp-ders-ust">%s · %s</div>'
+        '<div class="kamp-makro-kucuk">%s</div>'
+        '<div class="kamp-mikro-baslik">%s</div>'
+        '<div class="kamp-dilim">Görev %s/%s — %s seviye</div>'
+        '%s'
+        '<div class="kamp-gorev-tur">GÖREV: %s</div>'
+        '</div>'
+        % (
+            html.escape(str(secilen_ders).upper()),
+            html.escape(gorev_etiketi),
+            html.escape(str(kilit["makro_unite"])),
+            html.escape(str(aktif_mikro)),
+            dilim["dilim_no"], dilim["toplam_dilim"],
+            html.escape(seviye_etiketi),
+            soru_satiri,
+            html.escape(gorev_etiketi),
+        ),
         unsafe_allow_html=True,
     )
 
@@ -491,30 +643,37 @@ def render(ctx):
             st.rerun()
     else:
         st.markdown("### ✅ Sonuç Girişi")
-        c1, c2 = st.columns(2)
-        with c1:
-            yanlis = st.number_input(
-                "Yanlış", min_value=0, max_value=hedef, value=0, step=1,
-                key="kamp_yanlis_in",
-            )
-        with c2:
-            bos = st.number_input(
-                "Boş", min_value=0, max_value=hedef, value=0, step=1,
-                key="kamp_bos_in",
-            )
-        if int(yanlis) + int(bos) > hedef:
-            st.error(
-                "Yanlış + boş toplamı hedef soru sayısını (%d) aşamaz." % hedef
-            )
-        else:
-            dogru = max(0, hedef - int(yanlis) - int(bos))
-            oran = (dogru / float(hedef) * 100.0) if hedef else 0.0
+        # v2.6: Sonuç alanları `st.form` içindedir. Enter tuşu sayfayı
+        # yenilemez; form tek seferde gönderilir. Aktif görev/kronometre
+        # veritabanında tutulduğu için rerun'da kaybolmaz.
+        with st.form("kamp_sonuc_form_%s" % kayit_id, clear_on_submit=False):
+            c1, c2 = st.columns(2)
+            with c1:
+                yanlis = st.number_input(
+                    "Yanlış", min_value=0, max_value=hedef, value=0, step=1,
+                    key="kamp_yanlis_in",
+                )
+            with c2:
+                bos = st.number_input(
+                    "Boş", min_value=0, max_value=hedef, value=0, step=1,
+                    key="kamp_bos_in",
+                )
+            dogru_on = max(0, hedef - int(yanlis) - int(bos))
+            oran_on = (dogru_on / float(hedef) * 100.0) if hedef else 0.0
             st.caption(
-                "Doğru: %d · Başarı: %%%.1f · Eşik: %%75" % (dogru, oran)
+                "Doğru: %d · Başarı: %%%.1f · Eşik: %%75" % (dogru_on, oran_on)
             )
-            if st.button(
-                "Sonucu Kaydet ve Devam Et", type="primary", key="kamp_sonuc_kaydet"
-            ):
+            gonder = st.form_submit_button(
+                "Sonucu Kaydet ve Devam Et", type="primary"
+            )
+        if gonder:
+            if int(yanlis) + int(bos) > hedef:
+                st.error(
+                    "Yanlış + boş toplamı hedef soru sayısını (%d) aşamaz." % hedef
+                )
+            elif st.session_state.get("kamp_sonuc_kaydedildi") == kayit_id:
+                st.info("Bu görev zaten kaydedildi; ikinci kez işlenmedi.")
+            else:
                 try:
                     sonuc = kamp_motoru.mikro_gorev_tamamla(
                         kayit_id, int(yanlis), int(bos)
@@ -522,6 +681,7 @@ def render(ctx):
                 except Exception as hata:  # noqa: BLE001
                     set_flash_message("error", f"Kamp kaydı tamamlanamadı: {hata}")
                     st.rerun()
+                st.session_state["kamp_sonuc_kaydedildi"] = kayit_id
                 _temizle_gorev_durumu()
                 if sonuc.get("analiz_gerekli"):
                     st.session_state["kamp_analiz"] = sonuc

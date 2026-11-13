@@ -16,6 +16,7 @@ Bu modül saf veri + saf yardımcıdır; servis/arayüz/DB import etmez.
 
 # Eski/alternatif ad -> kanonik müfredat ad(ları)
 KONU_ALIASLARI = {
+    "Doğruda Açılar": ["Temel Kavramlar ve Doğruda Açılar"],
     "Divan Edebiyaı": ["Divan Edebiyatı"],
     "Beylikten Devlete Osmanlı Siyaseti": ["Beylikten Devlete Osmanlı"],
     "Klasik Mantık": ["Klasik Mantık ve Mantık-Dil"],

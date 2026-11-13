@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from data import curriculum_meta as cm
+from data import question_targets as qt
 
 VARSAYILAN_DB_YOLU = "yks_veritabani.db"
 
@@ -199,6 +200,10 @@ _EK_KOLONLAR = (
     ("gorev_turu", "TEXT"),
     ("adimlar_json", "TEXT"),
     ("soru_gerekli", "INTEGER NOT NULL DEFAULT 1"),
+    # v2.6: soru ilerlemesine bu kaydın yalnızca BİR kez sayıldığını işaretler.
+    ("sayildi", "INTEGER NOT NULL DEFAULT 0"),
+    # v2.6: görev diliminin seviyesi (kolay/orta/zor) — gösterim ve denetim.
+    ("seviye", "TEXT"),
 )
 
 
@@ -276,48 +281,137 @@ def mikro_dilimle(hedef_soru):
     return dilimler
 
 
-def aktif_makro_unite_hesapla(ders, mufredat, bilinen=(), biten=(),
-                              sinif_seviyesi=None, alan=None):
-    """Ders için bitmemiş İLK makro üniteyi kilitler (havuz + çekirdek).
+def _bilinen_kumeleri(bilinen):
+    """(ders, mikro) çiftleri ve eski biçim düz mikro adlarını ayırır."""
+    ciftler, adlar = set(), set()
+    for deger in bilinen or ():
+        if isinstance(deger, (tuple, list)) and len(deger) >= 2:
+            ciftler.add((str(deger[0]), str(deger[1])))
+        elif deger:
+            adlar.add(str(deger))
+    return ciftler, adlar
 
-    - Sınıf/alan havuzuna göre süzülür (`havuz_suz`).
-    - AYT dersleri için `CEKIRDEK_TYT_ONKOSULLAR` kilidi uygulanır (11. sınıf
-      istisnası hariç).
-    - Aktif makro ünitenin TÜM mikro konuları %100 bitmeden sonraki makroya
-      GEÇİLMEZ.
 
-    Dönen: `{"ders", "makro_unite", "mikrolar": [bitmemiş mikro...]}` veya None.
+def _tamam_mi(ders, mikro, ciftler, adlar, biten):
+    """Mikro konu bu öğrenci için tamamlanmış mı? (ders bazlı eşleşme)"""
+    return (
+        (ders, mikro) in ciftler
+        or (ders, mikro) in biten
+        or mikro in adlar
+    )
+
+
+def _cekirdek_eksikleri(ders, ciftler, adlar, biten):
+    """AYT çekirdek TYT ön koşullarından eksik olanların listesi."""
+    gerekli = cm.CEKIRDEK_TYT_ONKOSULLAR.get(ders) or []
+    bilinen_mikrolar = adlar | {m for _d, m in (ciftler | biten)}
+    eksik = []
+    for konu in gerekli:
+        bulundu = False
+        for mevcut in bilinen_mikrolar:
+            if cm.konu_iceriyor_mu(mevcut, konu) or cm.konu_iceriyor_mu(konu, mevcut):
+                bulundu = True
+                break
+        if not bulundu:
+            eksik.append(konu)
+    return eksik
+
+
+def kamp_kuyrugu_hesapla(ders, mufredat, bilinen=(), biten=(),
+                         sinif_seviyesi=None, alan=None):
+    """Kamp görev kuyruğunu ve DURUM NEDENİNİ birlikte döndürür.
+
+    Olası `durum` değerleri (hepsi aynı mesajı göstermez):
+      - `hazir`            : sıradaki makro ünite ve çalışılacak mikrolar var.
+      - `onkosul_kilitli`  : AYT dersinin çekirdek TYT ön koşulları eksik.
+      - `tamamlandi`       : gerçekten bütün uygun mikro konular tamamlanmış.
+      - `tanim_eksik`      : ders havuzda yok veya mikro konu tanımı boş.
+
+    `bilinen` hem `(ders, mikro)` çiftlerini hem eski düz mikro adlarını kabul
+    eder. Düz adlar yalnızca geriye dönük uyumluluk içindir; yeni çağrılar
+    çift göndermelidir (aynı ad farklı derslerde bulunabilir).
     """
     havuz = cm.havuz_suz(mufredat or {}, sinif_seviyesi, alan)
-    makro_dict = havuz.get(ders) or {}
+    makro_dict = havuz.get(ders)
     if not isinstance(makro_dict, dict) or not makro_dict:
-        return None
-    if str(ders).startswith("AYT"):
-        if cm.sinif_seviyesi_sayisi(sinif_seviyesi) != 11 and not cm.cekirdek_acik_mi(
-            ders, bilinen, biten
-        ):
-            return None
-    biten_set = {(str(d), str(m)) for d, m in (biten or ())}
-    bilinen_set = set(bilinen or ())
+        return {"durum": "tanim_eksik", "neden": "ders_havuzda_yok", "ders": ders}
+
+    ciftler, adlar = _bilinen_kumeleri(bilinen)
+    biten_ciftler = {
+        (str(d), str(m)) for d, m in (biten or ())
+        if d is not None and m is not None
+    }
+
+    # AYT çekirdek TYT kilidi (11. sınıf Maarif istisnası korunur).
+    if str(ders).startswith("AYT") and cm.sinif_seviyesi_sayisi(sinif_seviyesi) != 11:
+        eksik = _cekirdek_eksikleri(ders, ciftler, adlar, biten_ciftler)
+        oran = cm.cekirdek_tamam_orani(
+            ders,
+            adlar | {m for _d, m in ciftler},
+            {m for _d, m in biten_ciftler},
+        )
+        if oran < cm.CEKIRDEK_ESIK_ORANI:
+            return {
+                "durum": "onkosul_kilitli",
+                "ders": ders,
+                "eksik_onkosular": eksik,
+                "oran": round(oran * 100.0, 1),
+                "esik": int(cm.CEKIRDEK_ESIK_ORANI * 100),
+            }
+
     sira = cm.sira_no_haritasi(havuz)
     adaylar = []
+    bos_makro = 0
     for makro, mikrolar in makro_dict.items():
-        if not isinstance(mikrolar, list) or not mikrolar:
+        if not isinstance(mikrolar, list) or not [m for m in mikrolar if m]:
+            bos_makro += 1
             continue
         kalan = [
             m for m in mikrolar
-            if m not in bilinen_set and (str(ders), str(m)) not in biten_set
+            if m and not _tamam_mi(ders, m, ciftler, adlar, biten_ciftler)
         ]
         if kalan:
             ilk_sira = min(
                 (sira.get((ders, m), 10 ** 6) for m in kalan), default=10 ** 6
             )
-            adaylar.append((ilk_sira, makro, kalan))
+            adaylar.append((ilk_sira, makro, kalan, len(mikrolar)))
+
     if not adaylar:
-        return None
+        if bos_makro == len(makro_dict):
+            return {
+                "durum": "tanim_eksik", "neden": "mikro_tanimi_yok", "ders": ders,
+            }
+        return {"durum": "tamamlandi", "ders": ders}
+
     adaylar.sort(key=lambda c: c[0])
-    ilk = adaylar[0]
-    return {"ders": ders, "makro_unite": ilk[1], "mikrolar": ilk[2]}
+    _sira, makro, kalan, toplam = adaylar[0]
+    return {
+        "durum": "hazir",
+        "ders": ders,
+        "makro_unite": makro,
+        "mikrolar": kalan,
+        "toplam_mikro": toplam,
+        "tamamlanan_mikro": max(0, toplam - len(kalan)),
+    }
+
+
+def aktif_makro_unite_hesapla(ders, mufredat, bilinen=(), biten=(),
+                              sinif_seviyesi=None, alan=None):
+    """Geriye dönük uyumlu sarmalayıcı: yalnızca `hazir` durumda sözlük döner.
+
+    Ayrıntılı neden (kilit / gerçek tamamlanma / eksik tanım) için
+    `kamp_kuyrugu_hesapla` kullanılmalıdır.
+    """
+    sonuc = kamp_kuyrugu_hesapla(
+        ders, mufredat, bilinen, biten, sinif_seviyesi, alan
+    )
+    if sonuc.get("durum") != "hazir":
+        return None
+    return {
+        "ders": sonuc["ders"],
+        "makro_unite": sonuc["makro_unite"],
+        "mikrolar": sonuc["mikrolar"],
+    }
 
 
 def sonraki_adim(basari_orani_degeri):
@@ -415,31 +509,39 @@ def oturum_baslat(ogrenci_id, tema=None, an=None):
     return oturum_getir(oturum_id)
 
 
-def gorev_plani_uret(ders, makro_unite, mikro_konu, hedef_soru):
+def gorev_plani_uret(ders, makro_unite, mikro_konu, hedef_soru, dilim_no=1,
+                     seviye=None):
     """Kamp mikro görevi için pedagojik çalışma planı üretir.
 
-    Kamp mikro görevleri **ilk kez çalışılan** konulardır. Mevcut
-    `task_steps.adimlari_uret` kullanılır; yeni bir sınıflandırma yazılmaz.
+    v2.6 atomik dilim kuralı:
+      - 1. dilim: konu anlatımı/video + kısa not + 8 soru (öğrenme + ilk pratik).
+      - Sonraki dilimler: YALNIZCA 8 soru (kolay/orta/zor etiketi korunur).
+    Böylece 48 soruluk pekiştirme görevi altı küçük tamamlanabilir parçaya
+    ayrılır; görev dilimi tamamlanması mikro konunun %100 öğrenildiği anlamına
+    GELMEZ (tam hedef ve tüm dilimler ayrıca izlenir).
 
-    - Ezber dersleri: konu anlatımı + kısa not + aktif hatırlama + düşük soru.
-    - Pekiştirme dersleri: konu anlatımı + kısa not + kolay→orta→zor soru.
-
-    Dönen sözlük: `pedagoji_turu`, `gorev_turu`, `adimlar`, `soru_gerekli`,
-    `hedef_soru`.
+    Mevcut `task_steps.adimlari_uret` kullanılır; yeni sınıflandırma yazılmaz.
     """
     from data.pedagogy import get_konu_pedagoji_turu
     from services import task_steps
 
     pedagoji = get_konu_pedagoji_turu(ders)
     hedef = max(0, int(hedef_soru or 0))
+    try:
+        dilim_no = max(1, int(dilim_no or 1))
+    except (TypeError, ValueError):
+        dilim_no = 1
+    if dilim_no == 1:
+        gorev_turu = "konu_anlatimi" if pedagoji == "Ezber" else "anlatim"
+    else:
+        gorev_turu = "soru"
     gorev = {
         "ders": ders,
         "makro_konu": makro_unite,
         "mikro_konu": mikro_konu,
         "hedef_soru": hedef,
         "pedagoji_turu": pedagoji,
-        # Ezber: zorunlu konu anlatımı + kavram; Pekiştirme: standart öğrenme.
-        "gorev_turu": "konu_anlatimi" if pedagoji == "Ezber" else "anlatim",
+        "gorev_turu": gorev_turu,
     }
     try:
         adimlar = task_steps.adimlari_uret(gorev)
@@ -448,10 +550,12 @@ def gorev_plani_uret(ders, makro_unite, mikro_konu, hedef_soru):
     soru_gerekli = 1 if any(a.get("adim_turu") == "soru" for a in adimlar) else 0
     return {
         "pedagoji_turu": pedagoji,
-        "gorev_turu": "konu_ogrenme",
+        "gorev_turu": "konu_ogrenme" if dilim_no == 1 else "soru_dilimi",
         "adimlar": adimlar,
         "soru_gerekli": soru_gerekli,
         "hedef_soru": hedef,
+        "dilim_no": dilim_no,
+        "seviye": seviye,
     }
 
 
@@ -477,10 +581,140 @@ def tekrar_gorev_plani(ders, makro_unite, mikro_konu):
     }
 
 
+def _kamp_ilerlemesini_yaz(conn, kayit, sayildi=0):
+    """Kamp görevini `mikro_konu_ilerleme` tablosuna ATOMİK olarak yansıtır.
+
+    - Alt konu düzeyi kullanılmaz; mikro düzeyinde tek satır (`alt_konu = ''`).
+    - `hedef_soru` = dersin TOPLAM hedefi (24 normal / 48 pekiştirme).
+    - `cozulen_soru` yalnızca kayıt daha önce sayılmadıysa artar (çift sayım yok)
+      ve toplam hedefi aşamaz.
+    - `ogrenme_tamam` 1. dilim başarıyla (>= %75) bitince 1 olur.
+    - `tamamlandi` yalnızca öğrenme + TÜM dilimler geçildi + soru hedefi doldu
+      koşullarında 1 olur. Böylece tek dilim bitirmek %100 öğrenme sayılmaz.
+    - Değerler geriye düşürülmez (mevcut değerlerle max alınır).
+    """
+    ders = _metin(kayit.get("ders")) or ""
+    mikro = _metin(kayit.get("mikro_konu")) or ""
+    if not (ders and mikro):
+        return None
+    try:
+        oid = int(kayit.get("ogrenci_id"))
+    except (TypeError, ValueError):
+        return None
+    toplam = qt.toplam_soru(ders)
+    dilim_sayisi = len(qt.dilimler(ders))
+    gecen = {
+        int(satir[0]) for satir in conn.execute(
+            "SELECT DISTINCT dilim_no FROM kamp_mikro_kayitlari"
+            " WHERE ogrenci_id = ? AND ders = ? AND mikro_konu = ?"
+            " AND durum = ?",
+            (oid, ders, mikro, DURUM_TAMAM),
+        ).fetchall() if satir[0] is not None
+    }
+    # 1. dilim (öğrenme + ilk pratik) başarıyla geçildiyse öğrenme tamamdır.
+    ogrenme = 1 if 1 in gecen else 0
+    tamam = 1 if (ogrenme and len(gecen) >= dilim_sayisi) else 0
+    # Soru HEDEFİ yalnızca BAŞARIYLA (%75+) tamamlanan dilimlerde sayılır.
+    # Böylece başarısız deneme/tekrar, soru hedefini şişirmez; 3 dilim x 8 = 24.
+    try:
+        hedef_soru_kayit = max(0, int(kayit.get("hedef_soru") or 0))
+    except (TypeError, ValueError):
+        hedef_soru_kayit = 0
+    gorev_tamam = str(kayit.get("durum") or "") == DURUM_TAMAM
+
+    mevcut = conn.execute(
+        "SELECT id, ogrenme_tamam, hedef_soru, cozulen_soru, tamamlandi"
+        " FROM mikro_konu_ilerleme WHERE ogrenci_id = ? AND ders = ?"
+        " AND mikro_konu = ? AND COALESCE(alt_konu, '') = ''",
+        (oid, ders, mikro),
+    ).fetchone()
+    eski_ogrenme = int(mevcut["ogrenme_tamam"] or 0) if mevcut else 0
+    eski_hedef = int(mevcut["hedef_soru"] or 0) if mevcut else 0
+    eski_cozulen = int(mevcut["cozulen_soru"] or 0) if mevcut else 0
+    eski_tamam = int(mevcut["tamamlandi"] or 0) if mevcut else 0
+
+    yeni_cozulen = eski_cozulen + (
+        hedef_soru_kayit if (gorev_tamam and not sayildi) else 0
+    )
+    yeni_cozulen = max(0, min(max(toplam, eski_hedef), yeni_cozulen))
+    ogrenme = max(eski_ogrenme, ogrenme)
+    tamam = max(eski_tamam, tamam)
+    hedef = max(eski_hedef, toplam)
+    if not ogrenme or yeni_cozulen < hedef:
+        tamam = eski_tamam  # hedef dolmadan/öğrenme bitmeden kapanmaz
+    zaman = _zaman_yaz(simdi())
+    if mevcut:
+        conn.execute(
+            "UPDATE mikro_konu_ilerleme SET makro_konu = ?, ogrenme_tamam = ?,"
+            " hedef_soru = ?, cozulen_soru = ?, tamamlandi = ?,"
+            " guncelleme_zamani = ?, son_neden = 'kamp' WHERE id = ?",
+            (
+                _metin(kayit.get("makro_unite")), ogrenme, hedef,
+                yeni_cozulen, tamam, zaman, int(mevcut["id"]),
+            ),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO mikro_konu_ilerleme (ogrenci_id, ders, makro_konu,"
+            " mikro_konu, alt_konu, ogrenme_tamam, hedef_soru, cozulen_soru,"
+            " tamamlandi, olusturma_zamani, guncelleme_zamani, son_neden)"
+            " VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'kamp')",
+            (
+                oid, ders, _metin(kayit.get("makro_unite")), mikro,
+                ogrenme, hedef, yeni_cozulen, tamam, zaman, zaman,
+            ),
+        )
+    return {
+        "hedef_soru": hedef,
+        "cozulen_soru": yeni_cozulen,
+        "ogrenme_tamam": bool(ogrenme),
+        "tamamlandi": bool(tamam),
+        "gecen_dilim": len(gecen),
+        "toplam_dilim": dilim_sayisi,
+    }
+
+
+def mikro_dilim_ilerlemesi(ogrenci_id, ders, mikro_konu):
+    """Aktif mikro konunun görev (dilim) ilerlemesi — ikinci ilerleme çubuğu.
+
+    Dönen: `{"tamamlanan", "toplam", "oran", "dilimler"}`. Yalnızca başarıyla
+    tamamlanmış (%75+) dilimler sayılır; 6 dilimlik pekiştirmede 3/6 gibi.
+    """
+    toplam = len(qt.dilimler(ders))
+    try:
+        with _baglanti() as conn:
+            satirlar = conn.execute(
+                "SELECT DISTINCT dilim_no FROM kamp_mikro_kayitlari"
+                " WHERE ogrenci_id = ? AND ders = ? AND mikro_konu = ?"
+                " AND durum = ?",
+                (int(ogrenci_id), ders, mikro_konu, DURUM_TAMAM),
+            ).fetchall()
+    except (sqlite3.Error, TypeError, ValueError):
+        satirlar = []
+    gecen = sorted({int(s[0]) for s in satirlar if s[0] is not None})
+    oran = (len(gecen) / float(toplam) * 100.0) if toplam else 0.0
+    return {
+        "tamamlanan": len(gecen),
+        "toplam": toplam,
+        "oran": max(0.0, min(100.0, oran)),
+        "dilimler": gecen,
+    }
+
+
+def gorev_dilimleri(ders):
+    """Dersin 8 soruluk görev dilimleri (kolay/orta/zor etiketli)."""
+    return qt.dilimler(ders)
+
+
+def soru_hedefi(ders):
+    """Dersin seviye başına/toplam soru hedefi (24 veya 48)."""
+    return qt.soru_hedefi(ders)
+
+
 def mikro_gorev_baslat(oturum_id, ogrenci_id, ders, makro_unite, ana_konu,
                        mikro_konu, hedef_soru, dilim_no=1, toplam_dilim=1,
                        pedagoji_turu=None, gorev_turu=None, adimlar=None,
-                       soru_gerekli=1):
+                       soru_gerekli=1, seviye=None):
     """Aktif mikro görevi başlatır ve `baslangic_ts = time.time()` damgalar.
 
     Sayfa yenilense/mobil uykuya girse de geçen süre `time.time()-baslangic_ts`
@@ -501,14 +735,14 @@ def mikro_gorev_baslat(oturum_id, ogrenci_id, ders, makro_unite, ana_konu,
                 "INSERT INTO kamp_mikro_kayitlari (oturum_id, ogrenci_id, ders,"
                 " makro_unite, ana_konu, mikro_konu, dilim_no, toplam_dilim,"
                 " hedef_soru, pedagoji_turu, gorev_turu, adimlar_json,"
-                " soru_gerekli, baslangic_ts, durum)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " soru_gerekli, baslangic_ts, durum, seviye)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     int(oturum_id), int(ogrenci_id), _metin(ders),
                     _metin(makro_unite), _metin(ana_konu), _metin(mikro_konu),
                     int(dilim_no or 1), int(toplam_dilim or 1), hedef,
                     _metin(pedagoji_turu), _metin(gorev_turu), adimlar_json,
-                    1 if soru_gerekli else 0, ts, DURUM_AKTIF,
+                    1 if soru_gerekli else 0, ts, DURUM_AKTIF, _metin(seviye),
                 ),
             )
             kayit_id = imlec.lastrowid
@@ -570,12 +804,13 @@ def mikro_gorev_tamamla(kayit_id, yanlis_sayisi=0, bos_sayisi=0):
         bos = max(0, hedef - yanlis)
     oran = basari_orani(hedef, yanlis, bos)
     durum = DURUM_TAMAM if oran >= BASARI_ESIGI else DURUM_TEKRAR
+    sayildi = int(kayit.get("sayildi") or 0)
     with _baglanti() as conn:
         with _islem(conn):
             conn.execute(
                 "UPDATE kamp_mikro_kayitlari SET yanlis_sayisi = ?,"
                 " bos_sayisi = ?, basari_orani = ?, bitis_ts = ?,"
-                " gecen_sure_sn = ?, durum = ? WHERE id = ?",
+                " gecen_sure_sn = ?, durum = ?, sayildi = 1 WHERE id = ?",
                 (yanlis, bos, oran, ts, gecen, durum, int(kayit_id)),
             )
             conn.execute(
@@ -592,9 +827,19 @@ def mikro_gorev_tamamla(kayit_id, yanlis_sayisi=0, bos_sayisi=0):
                     int(kayit.get("oturum_id") or 0),
                 ),
             )
+            guncel = dict(kayit)
+            guncel.update({
+                "yanlis_sayisi": yanlis, "bos_sayisi": bos,
+                "basari_orani": oran, "durum": durum, "sayildi": 1,
+            })
+            try:
+                ilerleme = _kamp_ilerlemesini_yaz(conn, guncel, sayildi=sayildi)
+            except sqlite3.Error:
+                ilerleme = None
     sonuc = _kayit_getir(kayit_id)
     sonuc["analiz_gerekli"] = oran < BASARI_ESIGI
     sonuc["sonraki"] = sonraki_adim(oran)
+    sonuc["ilerleme"] = ilerleme
     return sonuc
 
 
