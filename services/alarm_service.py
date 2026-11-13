@@ -243,11 +243,11 @@ def hesapla_tum_alarmlar(ogrenci_id, mevcut_sinif, aktif_mufredat):
         alarmlar["mavi"].append({
             "ders": "Müfredat Takvimi",
             "konu": (
-                f"{ay_adi} Ayı Hedefi (%{abs(delta_yuzde)} Geride)"
+                f"{ay_adi} Ayı Hedefi ({abs(delta_yuzde)} puan geride)"
             ),
             "detay": (
                 f"{ay_adi} ayı hedeflenen tamamlama oranının"
-                f" **-%{abs(delta_yuzde)}** gerisindesiniz."
+                f" **{abs(delta_yuzde)} puan** gerisindesiniz."
             ),
             "aksiyon": "Haftalık çalışma temanıza 1 ek çalışma bloğu ekleyin.",
             "neden": "Takvim Geriliği",

@@ -603,6 +603,21 @@ def init_db():
             conn.execute(_SEMA_MIKRO_ILERLEME)
             for sorgu in _INDEKSLER_MIKRO_ILERLEME:
                 conn.execute(sorgu)
+            # v2.6: ilerleme gerilemesi denetimi için EKLEMELİ kolonlar.
+            # Eski kayıtlar korunur; kolonlar NULL kalabilir.
+            mevcut = {
+                satir[1]
+                for satir in conn.execute("PRAGMA table_info(mikro_konu_ilerleme)")
+            }
+            for ad, tip in (
+                ("son_neden", "TEXT"),
+                ("son_gerileme_zamani", "TEXT"),
+            ):
+                if ad not in mevcut:
+                    conn.execute(
+                        "ALTER TABLE mikro_konu_ilerleme ADD COLUMN %s %s"
+                        % (ad, tip)
+                    )
     return True
 
 
@@ -898,7 +913,7 @@ def _mikro_gercek_durum(conn, gorev):
     return toplam_adim, biten_adim, max(0, cozulen_soru), hedef_soru
 
 
-def mikro_ilerleme_guncelle(gorev_id, an=None):
+def mikro_ilerleme_guncelle(gorev_id, an=None, yeniden_degerlendir=False):
     """Mikro konu ilerlemesini GERÇEK adım/oturumlardan yeniden türetir.
 
     FAZ 5D kuralları:
@@ -906,6 +921,16 @@ def mikro_ilerleme_guncelle(gorev_id, an=None):
       - `hedef_soru`: mikro konunun TAM hedefi (görevin parçası değil).
       - `cozulen_soru`: mikro konunun tüm görevlerinde çözülen gerçek soru.
       - `tamamlandi`: öğrenme bitti VE hedef soru (varsa) doldu.
+
+    v2.6 İLERLEME KORUMASI:
+      Normal akışta ilerleme SEBESİZ YERE GERİLEMEZ. Yeniden hesaplama
+      sırasında eski kayıttan daha düşük bir değer türetilirse:
+        - `cozulen_soru` düşürülmez (çözülen soru birikimlidir),
+        - `hedef_soru` küçültülmez,
+        - `ogrenme_tamam` ve `tamamlandi` 1 ➔ 0 yapılmaz,
+        - engelleme `son_neden` / `son_gerileme_zamani` ile kayıt altına alınır.
+      Gelecekte bilinçli bir "yeniden değerlendirme" için
+      `yeniden_degerlendir=True` verilebilir; bu durumda gerçek değerler yazılır.
 
     Günlük görevin kapanması bu kaydı KAPATMAZ; kalan soru sonraki plana
     devreder. Bu yüzden fonksiyon görev `durum` alanına hiç bakmaz.
@@ -917,39 +942,72 @@ def mikro_ilerleme_guncelle(gorev_id, an=None):
                 return None
             toplam_adim, biten_adim, cozulen, hedef = _mikro_gercek_durum(conn, gorev)
             ogrenme_tamam = 1 if (toplam_adim > 0 and biten_adim >= toplam_adim) else 0
-            if hedef > 0:
-                tamam = 1 if (ogrenme_tamam and cozulen >= hedef) else 0
-            else:
-                tamam = ogrenme_tamam
+            tamam = 1 if (
+                (ogrenme_tamam and cozulen >= hedef) if hedef > 0 else ogrenme_tamam
+            ) else 0
             zaman = _zaman_yaz(an or simdi())
-            anahtar = (
-                gorev["ogrenci_id"], gorev["ders"], gorev["mikro_konu"], gorev["alt_konu"],
-            )
+
+            # --- Mevcut kayıt (varsa) -------------------------------------
             mevcut = conn.execute(
-                "SELECT id FROM mikro_konu_ilerleme WHERE ogrenci_id = ? AND ders = ?"
-                " AND mikro_konu = ? AND alt_konu = ?",
-                anahtar,
+                "SELECT id, ogrenme_tamam, hedef_soru, cozulen_soru, tamamlandi"
+                " FROM mikro_konu_ilerleme WHERE ogrenci_id = ? AND ders = ?"
+                " AND mikro_konu = ? AND COALESCE(alt_konu, '') = ?",
+                (
+                    gorev["ogrenci_id"], gorev["ders"], gorev["mikro_konu"],
+                    gorev["alt_konu"],
+                ),
             ).fetchone()
+
+            neden = "guncelleme"
+            gerileme = False
+            gerileme_zamani = None
+            if mevcut is not None and not yeniden_degerlendir:
+                eski_ogrenme = int(mevcut["ogrenme_tamam"] or 0)
+                eski_hedef = int(mevcut["hedef_soru"] or 0)
+                eski_cozulen = int(mevcut["cozulen_soru"] or 0)
+                eski_tamam = int(mevcut["tamamlandi"] or 0)
+
+                if cozulen < eski_cozulen:
+                    gerileme = True
+                    cozulen = eski_cozulen
+                if hedef < eski_hedef:
+                    gerileme = True
+                    hedef = eski_hedef
+                if eski_ogrenme and not ogrenme_tamam:
+                    gerileme = True
+                    ogrenme_tamam = 1
+                if eski_tamam and not tamam:
+                    gerileme = True
+                    tamam = 1
+                if gerileme:
+                    neden = "gerileme_engellendi"
+                    gerileme_zamani = zaman
+            elif mevcut is not None:
+                neden = "yeniden_degerlendirme"
+
             if mevcut is None:
                 conn.execute(
                     "INSERT INTO mikro_konu_ilerleme (ogrenci_id, ders, makro_konu,"
                     " mikro_konu, alt_konu, ogrenme_tamam, hedef_soru, cozulen_soru,"
-                    " tamamlandi, son_gorev_id, olusturma_zamani, guncelleme_zamani)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " tamamlandi, son_gorev_id, olusturma_zamani, guncelleme_zamani,"
+                    " son_neden) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         gorev["ogrenci_id"], gorev["ders"], gorev["makro_konu"],
                         gorev["mikro_konu"], gorev["alt_konu"], ogrenme_tamam,
-                        hedef, cozulen, tamam, gorev["id"], zaman, zaman,
+                        hedef, cozulen, tamam, gorev["id"], zaman, zaman, neden,
                     ),
                 )
             else:
                 conn.execute(
                     "UPDATE mikro_konu_ilerleme SET makro_konu = ?, ogrenme_tamam = ?,"
                     " hedef_soru = ?, cozulen_soru = ?, tamamlandi = ?,"
-                    " son_gorev_id = ?, guncelleme_zamani = ? WHERE id = ?",
+                    " son_gorev_id = ?, guncelleme_zamani = ?, son_neden = ?,"
+                    " son_gerileme_zamani = COALESCE(?, son_gerileme_zamani)"
+                    " WHERE id = ?",
                     (
                         gorev["makro_konu"], ogrenme_tamam, hedef, cozulen, tamam,
-                        gorev["id"], zaman, int(mevcut["id"]),
+                        gorev["id"], zaman, neden, gerileme_zamani,
+                        int(mevcut["id"]),
                     ),
                 )
     return {
@@ -961,6 +1019,8 @@ def mikro_ilerleme_guncelle(gorev_id, an=None):
         "cozulen_soru": cozulen,
         "kalan_soru": max(0, hedef - cozulen),
         "tamamlandi": bool(tamam),
+        "gerileme_engellendi": bool(gerileme),
+        "neden": neden,
     }
 
 

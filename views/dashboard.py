@@ -10,7 +10,8 @@ from services.topic_progress import get_aylik_mufredat_hedevi
 from views.shared import set_flash_message
 
 
-def render(ctx, saglik_skoru, delta_yuzde, gercek_orand, tyt_orani, ayt_orani):
+def render(ctx, saglik_skoru, delta_yuzde, gercek_orand, tyt_orani, ayt_orani,
+           hedef_yuzd=None):
     is_maarif = ctx.user["sinif_seviyesi"] in ["9. Sınıf", "10. Sınıf"]
     with st.sidebar:
         st.title("🎓 Öğrenci Profili")
@@ -136,15 +137,30 @@ def render(ctx, saglik_skoru, delta_yuzde, gercek_orand, tyt_orani, ayt_orani):
     m1.metric("🏥 Genel İlerleme Skoru", f"%{saglik_skoru}")
     m2.metric("🔥 Çalışma Serisi", f"{ctx.user['streak_count']} Gün")
     m3.metric("🚨 Dikkat Edilecek Konu", f"{toplam_alarm_sayisi} Adet")
-    delta_label = (
-        f"+%{delta_yuzde} İleride"
-        if delta_yuzde >= 0
-        else f"-%{abs(delta_yuzde)} Geride"
-    )
+    # v2.6: "-%40" gibi negatif görünen değerler İLERLEME DEĞİLDİR; bunlar
+    # aylık hedefe göre FARKTIR. Ekranda eksi işaretiyle "ilerleme" gibi
+    # gösterilmez; hedef ve gerçek oran ayrı, fark ise açık metinle verilir.
+    fark = round(float(delta_yuzde or 0), 1)
+    if fark >= 0:
+        delta_label = "Hedefin %.1f puan önünde" % fark
+        delta_renk = "normal"
+    else:
+        delta_label = "Hedefin %.1f puan gerisinde" % abs(fark)
+        delta_renk = "inverse"
     m4.metric(
         f"📅 {ay_adi_kokpit} Ayı Takvimi",
         f"%{round(gercek_orand, 1)}",
         delta=delta_label,
+        delta_color=delta_renk,
+        help=(
+            "Bu değer aylık müfredat hedefine göre FARKTIR; konu ilerlemesi "
+            "değildir. Hedef: %%%s" % (round(hedef_yuzd, 1) if hedef_yuzd is not None else "—")
+        ),
+    )
+    st.caption(
+        "ℹ️ Takvim farkı eksi bir ilerleme değildir; gerçek ilerleme her zaman"
+        " %%0–100 arasındadır (Hedef: %%%s)."
+        % (round(hedef_yuzd, 1) if hedef_yuzd is not None else "—")
     )
 
     st.markdown("---")

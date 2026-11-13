@@ -14,6 +14,8 @@ from services.topic_progress import (
     alt_durumlari_yukle,
     alt_konu_isaretle,
     alt_konulari_senkronla,
+    makro_ilerleme_detay,
+    mikro_ilerleme_oranlari,
     soru_borcu_baslat,
 )
 from views.shared import aktif_ogrenci_id, set_flash_message
@@ -96,11 +98,14 @@ def on_toplu_change(ders_adi, makro_adi, mikro_listesi, toplu_key):
                     (aktif_ogrenci_id(), ders_adi, makro_adi, m),
                 )
         c.commit()
-        if val:
-            soru_borcu_baslat(aktif_ogrenci_id(), ders_adi, mikro_listesi)
+    if val:
+        soru_borcu_baslat(aktif_ogrenci_id(), ders_adi, mikro_listesi)
     for m in mikro_listesi:
         st.session_state.pop(f"chk_{ders_adi}_{makro_adi}_{m}", None)
-        alt_konulari_senkronla(aktif_ogrenci_id(), ders_adi, makro_adi, mikro_listesi, val)
+    # v2.6: senkronizasyon döngü DIŞINDA bir kez çalışır (gereksiz tekrar yok).
+    alt_konulari_senkronla(
+        aktif_ogrenci_id(), ders_adi, makro_adi, mikro_listesi, val
+    )
 
 
 def on_ders_tamamen_bitir(ders_adi, makro_dict, bitir_mi=True):
@@ -150,6 +155,8 @@ def render(ctx):
         zip(df_tum_bilinenler["ders"], df_tum_bilinenler["mikro_konu"])
     )
     alt_durum_seti = set(alt_durumlari_yukle(ctx.user["id"]))
+    # v2.6: Konu Takip ve Kamp aynı ilerleme kaynağını kullanır.
+    mikro_oranlari = mikro_ilerleme_oranlari(ctx.user["id"], ctx.mufredat)
 
     if ctx.mufredat:
         ders_tablari = st.tabs(
@@ -197,18 +204,13 @@ def render(ctx):
                 if isinstance(makro_konular, dict):
                     for makro_adi, mikro_listesi in makro_konular.items():
                         if isinstance(mikro_listesi, list):
-                            tamamlananlar = [
-                                m
-                                for m in mikro_listesi
-                                if (ders_adi, m) in bilinen_pairs_set
-                            ]
-                            toplam_mikro = len(mikro_listesi)
-                            tamamlanan_sayi = len(tamamlananlar)
-                            yuzde = (
-                                int((tamamlanan_sayi / toplam_mikro) * 100)
-                                if toplam_mikro > 0
-                                else 0
+                            detay = makro_ilerleme_detay(
+                                ctx.user["id"], ders_adi, makro_adi,
+                                ctx.mufredat, oranlar=mikro_oranlari,
                             )
+                            toplam_mikro = detay["toplam"]
+                            tamamlanan_sayi = detay["tamamlanan"]
+                            yuzde = int(round(detay["oran"]))
 
                             expander_baslik = (
                                 f"{'✅' if yuzde == 100 else '📌'} {makro_adi}"
@@ -253,6 +255,18 @@ def render(ctx):
                                                 key_name,
                                             ),
                                         )
+                                        _mikro_oran = round(
+                                            mikro_oranlari.get(
+                                                (ders_adi, mikro_ad), 0.0
+                                            ),
+                                            1,
+                                        )
+                                        if _mikro_oran > 0:
+                                            st.caption(
+                                                "📈 Otomatik ilerleme: %%%s"
+                                                " (öğrenme + çözülen soru)"
+                                                % _mikro_oran
+                                            )
                                         alt_konu_arayuzu_ciz(
                                             ders_adi, makro_adi, mikro_ad, alt_durum_seti
                                         )

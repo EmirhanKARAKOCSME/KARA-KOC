@@ -246,9 +246,17 @@ def biten_konulari_yukle(ogrenci_id, aktif_mufredat=None, db_path=None):
     }
     adaylar = set(makro_haritasi)
     adaylar.update({(str(d), str(m)) for d, m, _alt in tamamlanan if d and m})
+    # v2.6: kamp görevleri mikro düzeyinde tek satır yazar (`alt_konu = ''`).
+    # Bu kayıt tamamlandıysa mikro konunun tamamı bitmiş kabul edilir.
+    mikro_tamamlanan = {
+        (str(d), str(m)) for d, m, alt in tamamlanan if not alt
+    }
 
     sonuc = set()
     for ders, mikro in adaylar:
+        if (ders, mikro) in mikro_tamamlanan:
+            sonuc.add((ders, mikro))
+            continue
         alts = [a for a in (MIKRO_ALT_KONULAR.get(mikro) or []) if a]
         if alts:
             # Tüm alt başlıklar kapanmış olmalı.
@@ -270,6 +278,175 @@ def biten_konulari_yukle(ogrenci_id, aktif_mufredat=None, db_path=None):
     if bekleyen and sonuc:
         sonuc = {k for k in sonuc if k not in bekleyen}
     return sonuc
+
+
+# ==============================================================================
+# v2.6 — TEK İLERLEME MODELİ (Konu Takip + Kamp aynı veriyi kullanır)
+# ==============================================================================
+# Ağırlık modeli: mikro konular bir makro ünite içinde EŞİT ağırlıklıdır.
+# Müfredatta mikro konu bazlı ayrı bir ağırlık verisi bulunmadığı için basit
+# ortalama yerine "eşit ağırlıklı ortalama" açıkça belgelenmiştir; veri
+# eklenirse yalnızca bu fonksiyon değiştirilir. Model canlı veriye otomatik
+# uygulanmaz; yalnızca okuma/gösterim hesabında kullanılır.
+ILERLEME_AGIRLIK_MODELI = "esit"
+ILERLEME_MIN = 0.0
+ILERLEME_MAX = 100.0
+# Mikro konu yüzdesinin bileşenleri: öğrenme %50, gerçek soru hedefi %50.
+OGRENME_PUANI = 50.0
+SORU_PUANI = 50.0
+
+
+def ilerleme_sinirla(deger, alt=ILERLEME_MIN, ust=ILERLEME_MAX):
+    """Herhangi bir ilerleme değerini 0–100 aralığına güvenle sabitler."""
+    try:
+        sayi = float(deger)
+    except (TypeError, ValueError):
+        return float(alt)
+    if sayi != sayi:  # NaN
+        return float(alt)
+    return max(float(alt), min(float(ust), sayi))
+
+
+def _kayit_ilerleme_orani(kayit):
+    """Tek `mikro_konu_ilerleme` satırının yüzdesi (0–100)."""
+    try:
+        ogrenme = int(kayit["ogrenme_tamam"] or 0)
+        hedef = max(0, int(kayit["hedef_soru"] or 0))
+        cozulen = max(0, int(kayit["cozulen_soru"] or 0))
+        tamam = int(kayit["tamamlandi"] or 0)
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+    if tamam:
+        return ILERLEME_MAX
+    oran = OGRENME_PUANI if ogrenme else 0.0
+    if hedef > 0:
+        oran += SORU_PUANI * min(1.0, cozulen / float(hedef))
+    elif ogrenme:
+        oran += SORU_PUANI
+    return ilerleme_sinirla(oran)
+
+
+def mikro_ilerleme_oranlari(ogrenci_id, aktif_mufredat=None, db_path=None):
+    """Öğrencinin mikro konu ilerlemeleri: `{(ders, mikro): 0..100}`.
+
+    TEK KAYNAK: bu fonksiyon hem Konu Takip hem Kamp ekranı tarafından
+    kullanılır. Öncelik:
+      1. %100 biten konu (`biten_konulari_yukle`) ➔ 100.
+      2. Öğrencinin "Biliyorum" beyanı ➔ 100 (mevcut davranış korunur).
+      3. `mikro_konu_ilerleme` kayıtları ➔ öğrenme %50 + soru hedefi %50.
+         Alt başlıklı konularda alt başlıkların ortalaması alınır.
+      4. Kayıt yoksa 0.
+    Pekiştirme bekleyen konu %50 ile sınırlanır (FAZ 5D kuralı).
+
+    Değerler HER ZAMAN 0–100 arasındadır; negatif üretilemez.
+    """
+    try:
+        oid = int(ogrenci_id)
+    except (TypeError, ValueError):
+        return {}
+
+    try:
+        biten = biten_konulari_yukle(oid, aktif_mufredat, db_path=db_path)
+    except Exception:  # noqa: BLE001 - tablo yoksa boş
+        biten = set()
+    try:
+        bekleyen = task_steps.pekistirme_bekleyenler(oid)
+    except Exception:  # noqa: BLE001
+        bekleyen = set()
+
+    manuel = set()
+    kayitlar = []
+    try:
+        with get_connection(db_path) as c:
+            for satir in c.execute(
+                "SELECT ders, mikro_konu FROM konu_durumlari_detay"
+                " WHERE ogrenci_id = ? AND durum = 'Biliyorum'",
+                (oid,),
+            ).fetchall():
+                if satir[0] and satir[1]:
+                    manuel.add((str(satir[0]), str(satir[1])))
+            try:
+                kayitlar = c.execute(
+                    "SELECT ders, mikro_konu, COALESCE(alt_konu, '') AS alt_konu,"
+                    " ogrenme_tamam, hedef_soru, cozulen_soru, tamamlandi"
+                    " FROM mikro_konu_ilerleme WHERE ogrenci_id = ?",
+                    (oid,),
+                ).fetchall()
+            except sqlite3.Error:
+                kayitlar = []
+    except sqlite3.Error:
+        kayitlar = []
+
+    gruplar = {}
+    for satir in kayitlar:
+        ders, mikro = str(satir[0] or ""), str(satir[1] or "")
+        if not (ders and mikro):
+            continue
+        gruplar.setdefault((ders, mikro), []).append({
+            "alt_konu": str(satir[2] or ""),
+            "ogrenme_tamam": satir[3],
+            "hedef_soru": satir[4],
+            "cozulen_soru": satir[5],
+            "tamamlandi": satir[6],
+        })
+
+    oranlar = {}
+    for anahtar, satirlar in gruplar.items():
+        _ders, mikro = anahtar
+        alts = [a for a in (MIKRO_ALT_KONULAR.get(mikro) or []) if a]
+        # Mikro düzeyinde (alt_konu = '') kayıt varsa doğrudan kullanılır.
+        mikro_satirlari = [s for s in satirlar if not s["alt_konu"]]
+        if mikro_satirlari:
+            oran = max(_kayit_ilerleme_orani(s) for s in mikro_satirlari)
+        elif alts:
+            harita = {s["alt_konu"]: s for s in satirlar if s["alt_konu"]}
+            parcalar = [
+                _kayit_ilerleme_orani(harita[a]) if a in harita else 0.0
+                for a in alts
+            ]
+            oran = sum(parcalar) / float(len(parcalar)) if parcalar else 0.0
+        else:
+            parcalar = [_kayit_ilerleme_orani(s) for s in satirlar]
+            oran = sum(parcalar) / float(len(parcalar)) if parcalar else 0.0
+        oranlar[anahtar] = ilerleme_sinirla(oran)
+
+    # %100 biten ve manuel beyan edilen konular her zaman 100'dür.
+    for anahtar in biten | manuel:
+        oranlar[anahtar] = ILERLEME_MAX
+    # Pekiştirme bekleyen konu %50 ile kilitlidir (biten sayılmaz).
+    for anahtar in bekleyen:
+        oranlar[anahtar] = min(oranlar.get(anahtar, 0.0), 50.0)
+    return oranlar
+
+
+def makro_ilerleme_detay(ogrenci_id, ders, makro_unite, mufredat, oranlar=None):
+    """Makro ünitenin mikro konulardan türetilmiş ilerleme detayı.
+
+    Dönen: `{"oran", "tamamlanan", "toplam", "mikrolar", "model"}`.
+    Oran her zaman 0–100 aralığındadır ve `ILERLEME_AGIRLIK_MODELI` ile
+    belgelenen eşit ağırlıklı ortalamadır.
+    """
+    try:
+        mikrolar = ((mufredat or {}).get(ders) or {}).get(makro_unite) or []
+    except Exception:  # noqa: BLE001
+        mikrolar = []
+    mikrolar = [m for m in mikrolar if m]
+    if not mikrolar:
+        return {
+            "oran": 0.0, "tamamlanan": 0, "toplam": 0,
+            "mikrolar": [], "model": ILERLEME_AGIRLIK_MODELI,
+        }
+    if oranlar is None:
+        oranlar = mikro_ilerleme_oranlari(ogrenci_id, mufredat)
+    parcalar = [ilerleme_sinirla(oranlar.get((ders, m), 0.0)) for m in mikrolar]
+    oran = sum(parcalar) / float(len(parcalar))
+    return {
+        "oran": round(ilerleme_sinirla(oran), 1),
+        "tamamlanan": sum(1 for p in parcalar if p >= ILERLEME_MAX),
+        "toplam": len(mikrolar),
+        "mikrolar": list(mikrolar),
+        "model": ILERLEME_AGIRLIK_MODELI,
+    }
 
 
 def init_alt_konu_db(db_path=None):
@@ -493,25 +670,20 @@ def gorev_chk_durum_senkron(anahtar, veritaban_degeri):
         st.session_state[isaret] = yeni
 
 
-def makro_unite_ilerleme_durumu(ogrenci_id, ders, makro_unite, mufredat):
-    """Bir makro ünitenin tamamlanma yüzdesi (0-100, tam sayı).
+def makro_unite_ilerleme_durumu(ogrenci_id, ders, makro_unite, mufredat, oranlar=None):
+    """Bir makro ünitenin tamamlanma yüzdesi (0–100, tam sayı).
 
-    v2.3 (FAZ 1.4): görev tamamlanınca bildirimde "Ünite İlerlemesi:
-    %33 ➔ %67" göstermek için kullanılır. Ünitedeki mikro konuların %100
-    biten oranına dayanır; tablo yoksa 0 döner (planlama/arayüz bozulmaz).
+    v2.6: Konu Takip ve Kamp ekranı AYNI fonksiyonu kullanır. Yüzde, ünitedeki
+    mikro konuların ilerlemelerinden türetilir (`mikro_ilerleme_oranlari`);
+    böylece kısmi ilerleme (öğrenme %50 + soru hedefi %50) görünür olur ve
+    değer asla negatif veya 100'ün üzerinde olamaz.
+
+    Geriye dönük uyumluluk için tam sayı döndürür.
     """
-    try:
-        mikrolar = ((mufredat or {}).get(ders) or {}).get(makro_unite) or []
-    except Exception:  # noqa: BLE001
-        mikrolar = []
-    if not mikrolar:
-        return 0
-    try:
-        biten = biten_konulari_yukle(ogrenci_id, mufredat)
-    except Exception:  # noqa: BLE001
-        biten = set()
-    tamam = sum(1 for m in mikrolar if (ders, m) in biten)
-    return int(round(tamam / float(len(mikrolar)) * 100))
+    detay = makro_ilerleme_detay(
+        ogrenci_id, ders, makro_unite, mufredat, oranlar=oranlar
+    )
+    return int(round(ilerleme_sinirla(detay["oran"])))
 
 
 
